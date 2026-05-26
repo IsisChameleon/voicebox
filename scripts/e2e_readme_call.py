@@ -30,14 +30,21 @@ async def login(page, email: str, password: str):
     logger.info(f"page url: {page.url}")
     if "/auth/login" not in page.url:
         return
-    # AuthPage uses <Input> components — labels by placeholder/type may vary.
-    # Use semantic email/password fields.
+    # AuthPage uses placeholder-only inputs (type=email/password). Submit
+    # button text is "Sign in" while activeTab === 'login' (the default
+    # for /auth/login per app/auth/login/page.tsx).
     await page.fill('input[type="email"]', email)
     await page.fill('input[type="password"]', password)
-    # Submit the form
-    await page.get_by_role("button", name="Log in", exact=False).first.click()
-    # Wait for redirect away from /auth/login
-    await page.wait_for_url(lambda u: "/auth/login" not in u, timeout=15000)
+    # The page contains two "Sign in" buttons — the tab toggle and the form
+    # submit. Scope to the form's submit button.
+    await page.locator('form button[type="submit"]').click()
+    # After login the root page server-redirects to /h/<uid> (or /onboarding
+    # if incomplete). Wait for the final destination, not just any non-login
+    # URL — otherwise we race the redirect and see "/".
+    await page.wait_for_url(
+        lambda u: "/h/" in u or "/onboarding" in u,
+        timeout=20000,
+    )
     logger.info(f"logged in; now at {page.url}")
 
 
@@ -46,71 +53,90 @@ async def navigate_to_call(page):
 
     Returns once we're on a `/call` URL.
     """
-    # We may already be on call (if a continue-reading link was clicked).
     if "/call" in page.url:
         return
-    # Click the first ReaderActionCard's CTA — either "Continue reading" or "Pick a story".
-    # Look for either; whichever exists first.
     logger.info(f"household page url: {page.url}")
-    # Cards are <motion.div> elements with the kid's name. The CTA is a button or
-    # element containing one of these labels.
-    candidates = ["Continue reading", "Pick a story", "Pick another"]
-    clicked = False
-    for label in candidates:
-        try:
-            loc = page.get_by_text(label, exact=False).first
-            if await loc.count() > 0 and await loc.is_visible():
-                await loc.click()
-                clicked = True
-                logger.info(f"clicked CTA: {label}")
-                break
-        except Exception as e:
-            logger.debug(f"locator {label!r}: {e}")
-    if not clicked:
-        raise RuntimeError("could not find any reader CTA on the household page")
+    # Wait for the household page to actually render — RSC streaming means
+    # the page can be at the right URL while the body is still empty.
+    import re
+    cta_regex = re.compile(r"Continue reading|Pick a story|Pick another|No readers yet")
+    cta_locator = page.get_by_text(cta_regex).first
+    try:
+        await cta_locator.wait_for(state="visible", timeout=15000)
+    except Exception:
+        body_text = await page.evaluate("() => document.body.innerText.slice(0, 500)")
+        raise RuntimeError(
+            f"household page did not render a CTA. body excerpt:\n{body_text!r}"
+        )
+    text = (await cta_locator.inner_text()).strip()
+    logger.info(f"household CTA found: {text!r}")
+    if "No readers yet" in text:
+        raise RuntimeError("test account has no readers — onboarding not done?")
+    await cta_locator.click()
 
     # If we land on the reader page (book picker), pick the first book.
     try:
-        await page.wait_for_url(lambda u: "/r/" in u and "/call" not in u, timeout=5000)
-        logger.info(f"reader page: {page.url} — need to pick a book")
-        # Books are likely cards with titles. Click the first one with any link or
-        # button child. Heuristic: anything that looks like a card.
-        # Easiest: find any anchor whose href contains "/call?bookId=" and click it.
+        await page.wait_for_url(lambda u: "/r/" in u and "/call" not in u, timeout=4000)
+        logger.info(f"reader page: {page.url}")
         book = page.locator('a[href*="/call?bookId="]').first
         await book.wait_for(state="visible", timeout=10000)
         await book.click()
     except Exception:
         pass
 
-    await page.wait_for_url(lambda u: "/call" in u, timeout=10000)
+    await page.wait_for_url(lambda u: "/call" in u, timeout=15000)
     logger.info(f"on call page: {page.url}")
 
 
 async def wait_for_connected(page, timeout: float = 60.0):
-    """Wait until the status indicator text reads `connected` or `ready`."""
+    """Wait until ConnectButton reports "End reading" (= connectionState in
+    {connected, ready}). voice-ui-kit's ConnectButton renders its label as
+    aria-label with no innerText, so we check both."""
     logger.info("waiting for call to connect…")
     end = asyncio.get_event_loop().time() + timeout
-    last_state = None
+    last = None
     while asyncio.get_event_loop().time() < end:
         try:
-            state = await page.evaluate(
-                "() => document.querySelector('div[style*=\"color: var(--muted-foreground)\"]')?.innerText"
+            label = await page.evaluate(
+                """() => {
+                  const btns = Array.from(document.querySelectorAll('button'));
+                  for (const b of btns) {
+                    const text = (b.innerText || '').trim();
+                    const aria = b.getAttribute('aria-label') || '';
+                    const s = text || aria;
+                    if (/Start reading|End reading|Waking Ember|Ending/.test(s)) return s;
+                  }
+                  return null;
+                }"""
             )
         except Exception:
-            state = None
-        if state != last_state:
-            logger.info(f"connection state: {state!r}")
-            last_state = state
-        if state in ("connected", "ready"):
-            return state
+            label = None
+        if label != last:
+            logger.info(f"connect button label: {label!r}")
+            last = label
+        if label and "End reading" in label:
+            return label
         await asyncio.sleep(0.5)
-    raise TimeoutError(f"call did not reach connected within {timeout}s (last: {last_state!r})")
+    raise TimeoutError(f"call did not reach connected within {timeout}s (last: {last!r})")
 
 
 async def click_red_cross(page):
-    """Click the X button with aria-label="End session"."""
-    logger.info("clicking red cross to end call")
-    await page.get_by_role("button", name="End session").click()
+    """End the call via the UI.
+
+    Per call/page.tsx the X button has ``aria-label="End session"``. If that
+    isn't visible (e.g. covered by the book-reader overlay), fall back to the
+    ConnectButton ("End reading" aria-label) — both invoke handleDisconnect.
+    """
+    for name in ("End session", "End reading"):
+        loc = page.get_by_role("button", name=name)
+        try:
+            if await loc.count() > 0 and await loc.first.is_visible():
+                logger.info(f"clicking '{name}' to end call")
+                await loc.first.click()
+                return
+        except Exception:
+            continue
+    raise RuntimeError("no end-call button visible (End session / End reading)")
 
 
 async def main():
@@ -143,7 +169,8 @@ async def main():
     logger.info(f"browser ready: {info}")
 
     from playwright.async_api import async_playwright
-    async with async_playwright() as p:
+    try:
+      async with async_playwright() as p:
         browser = await p.chromium.connect_over_cdp(info["cdp_endpoint"])
         ctx = browser.contexts[0]
         page = ctx.pages[0]
@@ -151,28 +178,38 @@ async def main():
         page.on("pageerror", lambda e: logger.warning(f"pageerror {e}"))
 
         try:
-            await page.wait_for_load_state("networkidle", timeout=15000)
+            # Avoid networkidle — Next.js dev keeps a HMR WebSocket open and
+            # it never settles. domcontentloaded is enough here.
+            await page.wait_for_load_state("domcontentloaded", timeout=15000)
             await login(page, EMAIL, PASSWORD)
-            await page.wait_for_load_state("networkidle", timeout=15000)
+            await page.wait_for_load_state("domcontentloaded", timeout=15000)
             await navigate_to_call(page)
             await wait_for_connected(page, timeout=90.0)
 
-            # First turn: greet
-            logger.info("=== speak: greet ===")
+            async def dump_shim():
+                state = await page.evaluate(
+                    "() => ({inbound: window.__qzShim?.inboundChunks, outbound: window.__qzShim?.outboundChunks, pcCount: window.__qzShim?.pcCount, audioTrackCount: window.__qzShim?.audioTrackCount, errors: (window.__qzShim?.errors || []).slice(-5)})"
+                )
+                logger.info(f"shim counters: {state}")
+
+            await dump_shim()
+
+            # Ember likely greets first — listen briefly to catch any opening line.
+            logger.info("=== listen (initial greeting) ===")
+            r0 = await send_command("listen", timeout=20.0)
+            logger.info(f"ember (greeting): {r0.get('text','')!r}")
+
+            await dump_shim()
+
+            # First turn: ask
+            logger.info("=== speak: ask ===")
             await send_command("speak", text="Hi Ember! Can you tell me about this book in one short sentence?")
             await asyncio.sleep(1)
 
-            logger.info("=== listen ===")
-            r = await send_command("listen", timeout=45.0)
-            transcript = r.get("text", "")
-            logger.info(f"ember (turn 1): {transcript!r}")
-
-            if not transcript:
-                logger.warning("empty transcript — checking shim audio counters")
-                state = await page.evaluate(
-                    "() => ({inbound: window.__qzShim?.inboundChunks, outbound: window.__qzShim?.outboundChunks, pcCount: window.__qzShim?.pcCount, audioTrackCount: window.__qzShim?.audioTrackCount})"
-                )
-                logger.info(f"shim counters: {state}")
+            logger.info("=== listen (turn 1) ===")
+            r1 = await send_command("listen", timeout=45.0)
+            logger.info(f"ember (turn 1): {r1.get('text','')!r}")
+            await dump_shim()
 
             # Second turn
             logger.info("=== speak: follow-up ===")
@@ -180,10 +217,11 @@ async def main():
             await asyncio.sleep(1)
             r2 = await send_command("listen", timeout=30.0)
             logger.info(f"ember (turn 2): {r2.get('text','')!r}")
+            await dump_shim()
 
-            # End call by clicking red cross
+            # End call by clicking red cross (or End reading button as fallback).
             await click_red_cross(page)
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
             logger.info(f"after end-call, page url: {page.url}")
 
         finally:
@@ -191,11 +229,17 @@ async def main():
                 await browser.close()
             except Exception:
                 pass
-
-    logger.info("=== teardown ===")
-    await asyncio.to_thread(stop_browser)
-    stop_pipecat_process()
-    logger.info("done.")
+    finally:
+      logger.info("=== teardown ===")
+      try:
+          await asyncio.to_thread(stop_browser)
+      except Exception as e:
+          logger.warning(f"stop_browser failed: {e}")
+      try:
+          stop_pipecat_process()
+      except Exception as e:
+          logger.warning(f"stop_pipecat_process failed: {e}")
+      logger.info("done.")
 
 
 if __name__ == "__main__":
