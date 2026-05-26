@@ -112,7 +112,13 @@ class PipecatMCPAgent:
                         TurnAnalyzerUserTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3())
                     ]
                 ),
-                vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.2)),
+                # stop_secs gates "user turn ended". For the Toocan flow that
+                # was 0.2 s (bot's TTS-clean audio). In browser-shim mode the
+                # other side is a real human or a TTS bot whose audio comes
+                # via WebRTC with natural pauses — 0.2 s would chop Ember
+                # mid-sentence and we'd get single-word transcripts. 1.0 s
+                # is the sweet spot for capturing complete utterances.
+                vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=1.0)),
             ),
         )
 

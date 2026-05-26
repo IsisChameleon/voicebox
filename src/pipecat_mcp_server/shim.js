@@ -40,6 +40,11 @@
     audioWsUrl: AUDIO_WS_URL,
     pcCount: 0,
     audioTrackCount: 0,
+    // The sample rate of the FIRST outbound AudioData chunk we observed.
+    // For Daily/WebRTC tracks in Chrome this is typically 48000, but record
+    // it so we can verify / detect mismatches against the pipecat side.
+    outboundSampleRate: null,
+    outboundNumChannels: null,
     errors: [],
     get hasMediaDevices() { return !!navigator?.mediaDevices?.getUserMedia; },
     get hasWebCodecs() { return typeof AudioData !== 'undefined' && typeof MediaStreamTrackGenerator !== 'undefined'; },
@@ -167,6 +172,15 @@
                 }
                 if (chunk.done) break;
                 const value = chunk.value;
+                if (diag.outboundSampleRate === null) {
+                  diag.outboundSampleRate = value.sampleRate;
+                  diag.outboundNumChannels = value.numberOfChannels;
+                  console.log(TAG, 'first outbound AudioData', {
+                    sampleRate: value.sampleRate,
+                    numberOfChannels: value.numberOfChannels,
+                    numberOfFrames: value.numberOfFrames,
+                  });
+                }
                 const n = value.numberOfFrames;
                 const float32 = new Float32Array(n);
                 try {
