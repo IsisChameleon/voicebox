@@ -27,6 +27,7 @@ dependencies = [
     "pipecat-ai[cartesia,deepgram,local-smart-turn-v3,rnnoise,runner,silero,webrtc,websocket]>=1.1.0",
     "pipecat-ai[mlx-whisper]>=1.1.0; sys_platform == 'darwin'",
     "pipecat-ai[whisper]>=1.1.0; sys_platform != 'darwin'",
+    "playwright>=1.50,<2",
     "pyobjc-framework-CoreMedia>=11.0; sys_platform == 'darwin'",
     "pyobjc-framework-Quartz>=11.0; sys_platform == 'darwin'",
     "pyobjc-framework-ScreenCaptureKit>=11.0; sys_platform == 'darwin'",

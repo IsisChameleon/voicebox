@@ -37,12 +37,15 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregatorParams,
     UserTurnStoppedMessage,
 )
-from pipecat.runner.types import DailyRunnerArguments
+from pipecat.runner.types import DailyRunnerArguments, RunnerArguments
 from pipecat.runner.utils import create_transport
 from pipecat.services.stt_service import STTService
 from pipecat.services.tts_service import TTSService
 from pipecat.services.whisper.stt import WhisperSTTService, WhisperSTTServiceMLX
 from pipecat.transports.base_transport import BaseTransport
+
+from pipecat_mcp_server.raw_pcm_serializer import RawPCMSerializer
+from pipecat_mcp_server.runner_args import BrowserShimRunnerArguments
 from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
     TurnAnalyzerUserTurnStopStrategy,
 )
@@ -289,25 +292,57 @@ class PipecatMCPAgent:
         return KokoroTTSService(voice_id="af_heart")
 
 
-async def create_agent(runner_args: DailyRunnerArguments) -> PipecatMCPAgent:
-    """Create a PipecatMCPAgent wired to a Daily room.
+async def create_agent(runner_args: RunnerArguments) -> PipecatMCPAgent:
+    """Create a PipecatMCPAgent wired to the appropriate transport.
 
-    Args:
-        runner_args: Daily runner configuration (room URL + token).
+    Two modes are supported:
+      * ``DailyRunnerArguments`` — pipecat joins a Daily room directly as a
+        synthetic peer. Used for the Toocan bot-test flow.
+      * ``BrowserShimRunnerArguments`` — pipecat exposes a WebSocket
+        server that an in-browser shim connects to. Used when Claude
+        drives a real client UI via Playwright and the audio is
+        hijacked into the browser's mic / out of the browser's WebRTC
+        remote track.
 
     Returns:
-        A configured `PipecatMCPAgent` instance ready to be started.
+        A configured ``PipecatMCPAgent`` ready to be started.
 
     """
-    from pipecat.transports.daily.transport import DailyParams
+    if isinstance(runner_args, DailyRunnerArguments):
+        from pipecat.transports.daily.transport import DailyParams
 
-    transport_params = {
-        "daily": lambda: DailyParams(
+        transport_params = {
+            "daily": lambda: DailyParams(
+                audio_in_enabled=True,
+                audio_out_enabled=True,
+                video_out_enabled=True,
+                audio_in_filter=RNNoiseFilter(),
+            )
+        }
+        transport = await create_transport(runner_args, transport_params)
+        return PipecatMCPAgent(transport)
+
+    if isinstance(runner_args, BrowserShimRunnerArguments):
+        from pipecat.transports.websocket.server import (
+            WebsocketServerParams,
+            WebsocketServerTransport,
+        )
+
+        params = WebsocketServerParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
-            video_out_enabled=True,
-            audio_in_filter=RNNoiseFilter(),
+            audio_in_sample_rate=runner_args.sample_rate,
+            audio_out_sample_rate=runner_args.sample_rate,
+            # Browser already does AEC/AGC suppression via getUserMedia
+            # constraints — leave RNNoise off here to avoid double-processing.
+            add_wav_header=False,
+            serializer=RawPCMSerializer(sample_rate=runner_args.sample_rate),
         )
-    }
-    transport = await create_transport(runner_args, transport_params)
-    return PipecatMCPAgent(transport)
+        transport = WebsocketServerTransport(
+            params=params,
+            host=runner_args.host,
+            port=runner_args.port,
+        )
+        return PipecatMCPAgent(transport)
+
+    raise ValueError(f"Unsupported runner_args type: {type(runner_args).__name__}")

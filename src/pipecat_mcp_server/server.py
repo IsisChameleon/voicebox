@@ -25,8 +25,11 @@ import sys
 import requests
 from loguru import logger
 from mcp.server.fastmcp import FastMCP
+from pipecat.runner.types import DailyRunnerArguments
 
 from pipecat_mcp_server.agent_ipc import send_command, start_pipecat_process, stop_pipecat_process
+from pipecat_mcp_server.browser_session import start_browser, stop_browser
+from pipecat_mcp_server.runner_args import BrowserShimRunnerArguments
 
 logger.remove()
 logger.add(sys.stderr, level="DEBUG")
@@ -82,9 +85,55 @@ async def start_call(
     token = data["dailyToken"]
     room_id = data["roomId"]
 
-    start_pipecat_process(room_url=room_url, token=token)
+    start_pipecat_process(DailyRunnerArguments(room_url=room_url, token=token))
 
     return {"room_id": room_id, "room_url": room_url, "joined": True}
+
+
+@mcp.tool()
+async def start_browser_session(
+    url: str = "http://localhost:3000",
+    headless: bool = False,
+    cdp_port: int = 9222,
+    audio_port: int = 9091,
+) -> dict:
+    """Launch a Playwright-controlled Chromium with the qz audio shim injected.
+
+    The shim hijacks the browser's microphone (fed by Kokoro TTS from the MCP
+    server) and tees the bot's remote WebRTC audio back to Whisper, so an
+    MCP-driven Claude can play the role of the user in any browser-based
+    voice app — without the app being aware of the indirection.
+
+    The returned ``cdp_endpoint`` is the URL an external Playwright client
+    (e.g. ``@playwright/mcp``, playwright-cli) should ``connect_over_cdp``
+    against to drive the UI (login, navigate, click "Start reading", etc).
+
+    Args:
+        url: Initial URL to open (e.g. the app's home page).
+        headless: Run Chromium headless. Default false so you can watch.
+        cdp_port: Chromium remote-debugging port.
+        audio_port: Local port the WebSocket audio transport listens on.
+
+    Returns:
+        ``{cdp_endpoint, audio_ws_url}``.
+
+    """
+    audio_ws_url = f"ws://localhost:{audio_port}"
+    start_pipecat_process(
+        BrowserShimRunnerArguments(host="localhost", port=audio_port, sample_rate=48000)
+    )
+    try:
+        info = await asyncio.to_thread(
+            start_browser,
+            url=url,
+            audio_ws_url=audio_ws_url,
+            cdp_port=cdp_port,
+            headless=headless,
+        )
+    except Exception:
+        stop_pipecat_process()
+        raise
+    return info
 
 
 @mcp.tool()
@@ -163,12 +212,20 @@ async def capture_screenshot() -> str:
 async def stop() -> bool:
     """Stop the voice pipeline and clean up resources.
 
-    Call this when the voice conversation is complete to gracefully
-    shut down the voice agent.
+    Call this when the voice conversation is complete to gracefully shut
+    down the voice agent. Also closes the Playwright-controlled browser
+    if one is active (started via ``start_browser_session``).
 
     Returns true if the agent was stopped successfully, false otherwise.
     """
-    await send_command("stop")
+    try:
+        await send_command("stop")
+    finally:
+        # Best-effort browser teardown — never block stopping pipecat on it.
+        try:
+            await asyncio.to_thread(stop_browser)
+        except Exception as e:
+            logger.warning(f"stop_browser failed: {e}")
     return True
 
 
@@ -184,6 +241,7 @@ def main():
         logger.info("Ctrl-C detected, exiting!")
     finally:
         stop_pipecat_process()
+        stop_browser()
 
 
 if __name__ == "__main__":

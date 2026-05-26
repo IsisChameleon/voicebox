@@ -60,15 +60,17 @@ def _cleanup():
         _response_queue = None
 
 
-def start_pipecat_process(room_url: str, token: str):
-    """Start the Pipecat child process.
+def start_pipecat_process(runner_args):
+    """Start the Pipecat child process for the given runner configuration.
 
     Creates IPC queues and spawns a new process to run the Pipecat voice agent.
     Cleans up any existing process before starting a new one.
 
     Args:
-        room_url: Daily room URL to join.
-        token: Daily meeting token for the room.
+        runner_args: A pipecat ``RunnerArguments`` subclass instance —
+            either ``DailyRunnerArguments`` (peer-to-Daily, bot mode) or
+            ``BrowserShimRunnerArguments`` (WebSocket server for the
+            in-browser shim).
 
     """
     global _cmd_queue, _response_queue, _pipecat_process
@@ -84,7 +86,7 @@ def start_pipecat_process(room_url: str, token: str):
     logger.debug(f"Starting Pipecat MCP Agent process...")
     _pipecat_process = multiprocessing.Process(
         target=run_pipecat_process,
-        args=(_cmd_queue, _response_queue, room_url, token),
+        args=(_cmd_queue, _response_queue, runner_args),
     )
     _pipecat_process.start()
     logger.debug(f"Started Pipecat MCP Agent process (PID {_pipecat_process.ident})")
@@ -100,34 +102,31 @@ def stop_pipecat_process():
 def run_pipecat_process(
     cmd_queue: multiprocessing.Queue,
     response_queue: multiprocessing.Queue,
-    room_url: str,
-    token: str,
+    runner_args,
 ):
     """Entry point for the Pipecat child process.
 
-    Joins the given Daily room and runs the bot command loop. This function is
-    called in a separate process to avoid stdio collisions with the MCP protocol.
+    Runs the bot command loop bound to whatever transport ``runner_args``
+    selects. This function is called in a separate process to avoid stdio
+    collisions with the MCP protocol.
 
     Args:
         cmd_queue: Queue for receiving commands from the MCP server.
         response_queue: Queue for sending responses back to the MCP server.
-        room_url: Daily room URL to join.
-        token: Daily meeting token for the room.
+        runner_args: A ``RunnerArguments`` subclass instance (Daily,
+            browser-shim, etc.) — dispatched by ``create_agent``.
 
     """
     global _cmd_queue, _response_queue
 
     import asyncio
 
-    from pipecat.runner.types import DailyRunnerArguments
-
     from pipecat_mcp_server.bot import bot as bot_fn
 
     _cmd_queue = cmd_queue
     _response_queue = response_queue
 
-    runner_args = DailyRunnerArguments(room_url=room_url, token=token)
-    logger.debug(f"Pipecat MCP Agent joining Daily room: {room_url}")
+    logger.debug(f"Pipecat MCP Agent starting with {type(runner_args).__name__}")
     asyncio.run(bot_fn(runner_args))
 
     logger.debug("Pipecat runner is done...")
