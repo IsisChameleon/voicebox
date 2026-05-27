@@ -45,6 +45,10 @@
     // it so we can verify / detect mismatches against the pipecat side.
     outboundSampleRate: null,
     outboundNumChannels: null,
+    outboundFormat: null,
+    // Per-track byte counter — keyed by track.id. Useful to confirm we are
+    // tapping one logical audio track, not multiple copies of the same one.
+    perTrackBytes: {},
     errors: [],
     get hasMediaDevices() { return !!navigator?.mediaDevices?.getUserMedia; },
     get hasWebCodecs() { return typeof AudioData !== 'undefined' && typeof MediaStreamTrackGenerator !== 'undefined'; },
@@ -145,6 +149,16 @@
   if (typeof RTCPeerConnection !== 'undefined' && typeof MediaStreamTrackProcessor !== 'undefined') {
     try {
       const OrigRTCPeerConnection = window.RTCPeerConnection;
+
+      // Daily creates multiple RTCPeerConnections (media, data, fallback). The
+      // same logical bot audio can surface as a `track` event on more than one
+      // of them, or even fire multiple times on the same one (renegotiation,
+      // ICE restart). If we naively tap every event we'd ship the same
+      // samples N times to pipecat — the recorded WAV ends up "fast forward"
+      // because the buffer accumulates Nx audio over the same real-time
+      // interval. Deduplicate by track.id.
+      const tappedTrackIds = new Set();
+
       class WrappedRTCPeerConnection extends OrigRTCPeerConnection {
         constructor(...args) {
           super(...args);
@@ -152,6 +166,12 @@
           this.addEventListener('track', (ev) => {
             const track = ev.track;
             if (!track || track.kind !== 'audio') return;
+            if (tappedTrackIds.has(track.id)) {
+              console.log(TAG, 'duplicate track event for', track.id, '— skipping');
+              return;
+            }
+            tappedTrackIds.add(track.id);
+            track.addEventListener('ended', () => tappedTrackIds.delete(track.id));
             diag.audioTrackCount++;
             console.log(TAG, 'tee-ing remote audio track', track.id);
             let processor;
@@ -175,10 +195,12 @@
                 if (diag.outboundSampleRate === null) {
                   diag.outboundSampleRate = value.sampleRate;
                   diag.outboundNumChannels = value.numberOfChannels;
+                  diag.outboundFormat = value.format;
                   console.log(TAG, 'first outbound AudioData', {
                     sampleRate: value.sampleRate,
                     numberOfChannels: value.numberOfChannels,
                     numberOfFrames: value.numberOfFrames,
+                    format: value.format,
                   });
                 }
                 const n = value.numberOfFrames;
@@ -198,6 +220,8 @@
                   try {
                     ws.send(int16.buffer);
                     diag.outboundChunks++;
+                    diag.perTrackBytes[track.id] =
+                      (diag.perTrackBytes[track.id] || 0) + int16.byteLength;
                   } catch (e) {
                     recordError('ws.send outbound', e);
                   }

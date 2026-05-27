@@ -216,7 +216,17 @@ async def main():
 
             async def dump_shim():
                 state = await page.evaluate(
-                    "() => ({inbound: window.__voiceShim?.inboundChunks, outbound: window.__voiceShim?.outboundChunks, pcCount: window.__voiceShim?.pcCount, audioTrackCount: window.__voiceShim?.audioTrackCount, errors: (window.__voiceShim?.errors || []).slice(-5)})"
+                    "() => ({"
+                    "inbound: window.__voiceShim?.inboundChunks,"
+                    "outbound: window.__voiceShim?.outboundChunks,"
+                    "pcCount: window.__voiceShim?.pcCount,"
+                    "audioTrackCount: window.__voiceShim?.audioTrackCount,"
+                    "outboundSampleRate: window.__voiceShim?.outboundSampleRate,"
+                    "outboundNumChannels: window.__voiceShim?.outboundNumChannels,"
+                    "outboundFormat: window.__voiceShim?.outboundFormat,"
+                    "perTrackBytes: window.__voiceShim?.perTrackBytes,"
+                    "errors: (window.__voiceShim?.errors || []).slice(-5)"
+                    "})"
                 )
                 logger.info(f"shim counters: {state}")
 
