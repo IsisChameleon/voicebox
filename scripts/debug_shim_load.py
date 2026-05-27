@@ -1,6 +1,6 @@
 """Minimal: launch Playwright Chromium with the shim, eval features, dump console.
 
-Used to debug why ``window.__qzShim`` may be undefined when the launcher
+Used to debug why ``window.__voiceShim`` may be undefined when the launcher
 in ``browser_session.py`` is used end-to-end.
 """
 
@@ -20,7 +20,7 @@ SHIM_PATH = Path(__file__).resolve().parent.parent / "src" / "pipecat_mcp_server
 
 async def main(headless: bool):
     shim_src = SHIM_PATH.read_text(encoding="utf-8")
-    init_script = f"window.__QZ_AUDIO_WS_URL__ = 'ws://localhost:9091';\n{shim_src}"
+    init_script = f"window.__VOICE_SHIM_WS_URL__ = 'ws://localhost:9091';\n{shim_src}"
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -51,10 +51,10 @@ async def main(headless: bool):
         diag = await page.evaluate(
             """
             () => ({
-              shimExists: typeof window.__qzShim !== 'undefined',
-              shimKeys: window.__qzShim ? Object.keys(window.__qzShim) : null,
-              wsReady: window.__qzShim?.wsReady,
-              audioWsUrl: window.__qzShim?.audioWsUrl,
+              shimExists: typeof window.__voiceShim !== 'undefined',
+              shimKeys: window.__voiceShim ? Object.keys(window.__voiceShim) : null,
+              wsReady: window.__voiceShim?.wsReady,
+              audioWsUrl: window.__voiceShim?.audioWsUrl,
               hasMSTG: typeof MediaStreamTrackGenerator !== 'undefined',
               hasMSTP: typeof MediaStreamTrackProcessor !== 'undefined',
               hasAudioData: typeof AudioData !== 'undefined',
@@ -80,8 +80,8 @@ async def main(headless: bool):
         diag2 = await page.evaluate(
             """
             () => ({
-              shimExists: typeof window.__qzShim !== 'undefined',
-              wsReady: window.__qzShim?.wsReady,
+              shimExists: typeof window.__voiceShim !== 'undefined',
+              wsReady: window.__voiceShim?.wsReady,
               hasMSTG: typeof MediaStreamTrackGenerator !== 'undefined',
               isSecureContext: window.isSecureContext,
               location: location.href,

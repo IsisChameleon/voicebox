@@ -8,7 +8,7 @@ Then it:
   1. Waits for the shim's WS to connect.
   2. Calls ``speak("hello")`` via the IPC queues — verifies Kokoro audio gets
      pushed over the WebSocket toward the shim.
-  3. Polls the page for ``window.__qzShim`` debug counters.
+  3. Polls the page for ``window.__voiceShim`` debug counters.
   4. Tears everything down.
 
 This validates the audio plumbing without needing the readme app.
@@ -74,9 +74,9 @@ async def main():
         logger.info(f"page url: {page.url}, title: {(await page.title())!r}")
 
         shim_state = await page.evaluate(
-            "() => Object.assign({}, window.__qzShim, {"
-            " hasMediaDevices: window.__qzShim?.hasMediaDevices,"
-            " hasWebCodecs: window.__qzShim?.hasWebCodecs"
+            "() => Object.assign({}, window.__voiceShim, {"
+            " hasMediaDevices: window.__voiceShim?.hasMediaDevices,"
+            " hasWebCodecs: window.__voiceShim?.hasWebCodecs"
             "})"
         )
         logger.info(f"shim state (pre-speak): {shim_state}")
@@ -101,10 +101,10 @@ async def main():
         await asyncio.sleep(5)
         shim_state2 = await page.evaluate(
             "() => ({"
-            " wsReady: window.__qzShim?.wsReady,"
-            " inbound: window.__qzShim?.inboundChunks,"
-            " outbound: window.__qzShim?.outboundChunks,"
-            " errors: window.__qzShim?.errors,"
+            " wsReady: window.__voiceShim?.wsReady,"
+            " inbound: window.__voiceShim?.inboundChunks,"
+            " outbound: window.__voiceShim?.outboundChunks,"
+            " errors: window.__voiceShim?.errors,"
             "})"
         )
         logger.info(f"shim state (post-speak): {shim_state2}")

@@ -97,7 +97,7 @@ async def start_browser_session(
     cdp_port: int = 9222,
     audio_port: int = 9091,
 ) -> dict:
-    """Launch a Playwright-controlled Chromium with the qz audio shim injected.
+    """Launch a Playwright-controlled Chromium with the browser audio shim injected.
 
     The shim hijacks the browser's microphone (fed by Kokoro TTS from the MCP
     server) and tees the bot's remote WebRTC audio back to Whisper, so an

@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-"""Launches a Playwright-controlled Chromium with the qz audio shim.
+"""Launches a Playwright-controlled Chromium with the browser audio shim.
 
 The shim (``shim.js``) intercepts ``getUserMedia`` and wraps
 ``RTCPeerConnection`` so the page's mic comes from our MCP server and the
@@ -128,7 +128,7 @@ async def _run_browser_async(
 
     shim_src = SHIM_PATH.read_text(encoding="utf-8")
     init_script = (
-        f"window.__QZ_AUDIO_WS_URL__ = {audio_ws_url!r};\n{shim_src}"
+        f"window.__VOICE_SHIM_WS_URL__ = {audio_ws_url!r};\n{shim_src}"
     )
 
     chromium_args = [

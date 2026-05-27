@@ -40,3 +40,8 @@ MANIFEST
 
 # Pipecat
 whisker_setup.py
+
+# E2E test artifacts (committed selectively below)
+artifacts/**/*.png
+artifacts/**/*.wav
+artifacts/**/*.log

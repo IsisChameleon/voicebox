@@ -66,14 +66,18 @@ class PipecatMCPAgent:
     - speak(text): Speak text to the user via TTS
     """
 
-    def __init__(self, transport: BaseTransport):
+    def __init__(self, transport: BaseTransport, record_dir: Optional[str] = None):
         """Initialize the Pipecat MCP Agent.
 
         Args:
-            transport: Daily transport for audio I/O.
+            transport: Daily/WebSocket transport for audio I/O.
+            record_dir: If set, audio is buffered via AudioBufferProcessor and
+                ``stop()`` writes user/bot/merged WAVs into this directory.
 
         """
         self._transport = transport
+        self._record_dir = record_dir
+        self._audio_buffer = None  # type: ignore[assignment]
 
         self._task: Optional[asyncio.Task] = None
         self._pipeline_task: Optional[PipelineTask] = None
@@ -125,23 +129,39 @@ class PipecatMCPAgent:
         self._screen_capture = ScreenCaptureProcessor()
         self._vision = VisionProcessor()
 
+        if self._record_dir:
+            from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
+
+            self._audio_buffer = AudioBufferProcessor(
+                sample_rate=48000,
+                num_channels=1,
+                buffer_size=0,  # accumulate everything
+            )
+
         # Create pipeline with parallel branches:
         # - Main branch: audio processing (STT → aggregator → TTS)
         # - Vision branch: saves frames to disk on demand
-        pipeline = Pipeline(
-            [
-                self._transport.input(),
-                self._screen_capture,
-                ParallelPipeline(
-                    [stt, user_aggregator, tts],
-                    [self._vision],
-                ),
-                # Assistant aggregator before the transport, because we want to
-                # keep everyting from the client.
-                assistant_aggregator,
-                self._transport.output(),
-            ]
-        )
+        stages = [
+            self._transport.input(),
+            self._screen_capture,
+            ParallelPipeline(
+                [stt, user_aggregator, tts],
+                [self._vision],
+            ),
+            # Assistant aggregator before the transport, because we want to
+            # keep everyting from the client.
+            assistant_aggregator,
+            self._transport.output(),
+        ]
+        # AudioBufferProcessor must observe both InputAudioRawFrame (which
+        # flows through the whole pipeline from transport.input downstream)
+        # and OutputAudioRawFrame (emitted by TTS inside the ParallelPipeline,
+        # then routed to transport.output). Placing it at the END of the
+        # pipeline catches both as they continue downstream past the output —
+        # neither is destructively consumed by transport.output.
+        if self._audio_buffer:
+            stages.append(self._audio_buffer)
+        pipeline = Pipeline(stages)
 
         # enable_rtvi=False: we are a headless synthetic user, not an RTVI
         # client. Transcripts reach Claude via the listen() MCP tool's return
@@ -178,6 +198,13 @@ class PipecatMCPAgent:
         # Start pipeline in background
         self._task = asyncio.create_task(self._pipeline_runner.run(self._pipeline_task))
 
+        if self._audio_buffer is not None:
+            async def _start_recording():
+                await self._connected.wait()
+                await self._audio_buffer.start_recording()
+                logger.info("Audio recording started")
+            asyncio.create_task(_start_recording())
+
         self._started = True
         logger.info("Pipecat MCP Agent started!")
 
@@ -192,6 +219,14 @@ class PipecatMCPAgent:
 
         logger.info("Stopping Pipecat MCP agent...")
 
+        # Flush recordings BEFORE shutting down the pipeline — once EndFrame
+        # propagates the audio buffer processor is closed.
+        if self._audio_buffer is not None and self._record_dir:
+            try:
+                await self._dump_recordings()
+            except Exception as e:
+                logger.warning(f"recording dump failed: {e}")
+
         if self._pipeline_task:
             await self._pipeline_task.queue_frame(EndFrame())
 
@@ -200,6 +235,45 @@ class PipecatMCPAgent:
 
         self._started = False
         logger.info("Pipecat MCP Agent stopped")
+
+    async def _dump_recordings(self):
+        """Write captured audio to WAVs in ``self._record_dir``.
+
+        Pipecat's AudioBufferProcessor names its two buffers ``user`` (input
+        from the transport — in browser-shim mode this is the BOT's audio
+        coming via the shim's RTCPeerConnection tap) and ``bot`` (output from
+        the pipeline — Kokoro TTS that the shim feeds into the synthetic
+        mic). Writing both plus a merged stereo mix.
+        """
+        import os
+        import wave
+
+        os.makedirs(self._record_dir, exist_ok=True)
+        sr = self._audio_buffer.sample_rate
+
+        # IMPORTANT: read the buffers BEFORE calling stop_recording(). The
+        # processor's stop_recording() internally calls _reset_recording()
+        # which clears both buffers — call it after we've snapshotted bytes.
+        bot_audio = bytes(self._audio_buffer._user_audio_buffer)     # the remote bot's voice
+        kokoro_audio = bytes(self._audio_buffer._bot_audio_buffer)   # OUR (Kokoro) voice
+        merged = self._audio_buffer.merge_audio_buffers()             # mono mix
+
+        await self._audio_buffer.stop_recording()
+
+        def write_wav(path: str, audio_bytes: bytes):
+            with wave.open(path, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(sr)
+                w.writeframes(audio_bytes)
+
+        write_wav(os.path.join(self._record_dir, "ember_voice.wav"), bot_audio)
+        write_wav(os.path.join(self._record_dir, "kokoro_voice.wav"), kokoro_audio)
+        write_wav(os.path.join(self._record_dir, "merged.wav"), merged)
+        logger.info(
+            f"wrote recordings to {self._record_dir} "
+            f"(ember: {len(bot_audio)} B, kokoro: {len(kokoro_audio)} B, merged: {len(merged)} B)"
+        )
 
     async def listen(self) -> str:
         """Wait for user speech and return the transcribed text.
@@ -349,6 +423,6 @@ async def create_agent(runner_args: RunnerArguments) -> PipecatMCPAgent:
             host=runner_args.host,
             port=runner_args.port,
         )
-        return PipecatMCPAgent(transport)
+        return PipecatMCPAgent(transport, record_dir=runner_args.record_dir)
 
     raise ValueError(f"Unsupported runner_args type: {type(runner_args).__name__}")

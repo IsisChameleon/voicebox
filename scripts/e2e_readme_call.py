@@ -14,12 +14,19 @@ Run: ``uv run python scripts/e2e_readme_call.py``
 """
 
 import asyncio
+import os
 import sys
 
 from loguru import logger
 
 logger.remove()
 logger.add(sys.stderr, level="INFO")
+# Also tee to an artifacts log so we have a clean transcript artifact.
+_LOG_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "artifacts", "e2e_readme_call", "run.log")
+)
+os.makedirs(os.path.dirname(_LOG_PATH), exist_ok=True)
+logger.add(_LOG_PATH, level="INFO", mode="w")
 
 
 EMAIL = "isabelledebacker@live.com.au"
@@ -152,9 +159,18 @@ async def main():
     cdp_port = 9222
     audio_ws_url = f"ws://localhost:{audio_port}"
 
+    artifacts_dir = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "artifacts", "e2e_readme_call")
+    )
+    os.makedirs(artifacts_dir, exist_ok=True)
+    logger.info(f"artifacts dir: {artifacts_dir}")
+
     logger.info("=== starting pipecat (browser-shim mode) ===")
     start_pipecat_process(
-        BrowserShimRunnerArguments(host="localhost", port=audio_port, sample_rate=48000)
+        BrowserShimRunnerArguments(
+            host="localhost", port=audio_port, sample_rate=48000,
+            record_dir=artifacts_dir,
+        )
     )
     await asyncio.sleep(2)
 
@@ -177,18 +193,30 @@ async def main():
         page.on("console", lambda m: logger.debug(f"console[{m.type}] {m.text}"))
         page.on("pageerror", lambda e: logger.warning(f"pageerror {e}"))
 
+        async def shot(name: str):
+            path = os.path.join(artifacts_dir, f"{name}.png")
+            try:
+                await page.screenshot(path=path, full_page=False)
+                logger.info(f"📸 {path}")
+            except Exception as e:
+                logger.warning(f"screenshot failed ({name}): {e}")
+
         try:
             # Avoid networkidle — Next.js dev keeps a HMR WebSocket open and
             # it never settles. domcontentloaded is enough here.
             await page.wait_for_load_state("domcontentloaded", timeout=15000)
+            await shot("01_login_page")
             await login(page, EMAIL, PASSWORD)
             await page.wait_for_load_state("domcontentloaded", timeout=15000)
+            await shot("02_household_page")
             await navigate_to_call(page)
+            await shot("03_call_page_loaded")
             await wait_for_connected(page, timeout=90.0)
+            await shot("04_call_connected")
 
             async def dump_shim():
                 state = await page.evaluate(
-                    "() => ({inbound: window.__qzShim?.inboundChunks, outbound: window.__qzShim?.outboundChunks, pcCount: window.__qzShim?.pcCount, audioTrackCount: window.__qzShim?.audioTrackCount, errors: (window.__qzShim?.errors || []).slice(-5)})"
+                    "() => ({inbound: window.__voiceShim?.inboundChunks, outbound: window.__voiceShim?.outboundChunks, pcCount: window.__voiceShim?.pcCount, audioTrackCount: window.__voiceShim?.audioTrackCount, errors: (window.__voiceShim?.errors || []).slice(-5)})"
                 )
                 logger.info(f"shim counters: {state}")
 
@@ -220,8 +248,10 @@ async def main():
             await dump_shim()
 
             # End call by clicking red cross (or End reading button as fallback).
+            await shot("05_before_end_call")
             await click_red_cross(page)
             await asyncio.sleep(3)
+            await shot("06_after_end_call")
             logger.info(f"after end-call, page url: {page.url}")
 
         finally:
@@ -231,6 +261,13 @@ async def main():
                 pass
     finally:
       logger.info("=== teardown ===")
+      # Send the "stop" command FIRST so agent.stop() runs and flushes the
+      # audio recordings to disk. stop_pipecat_process() just kills the
+      # child, which would lose the buffered WAVs.
+      try:
+          await asyncio.wait_for(send_command("stop"), timeout=20.0)
+      except Exception as e:
+          logger.warning(f"send stop command failed: {e}")
       try:
           await asyncio.to_thread(stop_browser)
       except Exception as e:

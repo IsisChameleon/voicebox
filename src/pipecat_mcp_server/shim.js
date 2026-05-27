@@ -1,4 +1,4 @@
-// qz-mcp-server browser audio shim.
+// Browser audio shim for the MCP server.
 //
 // Injected as `addInitScript` before any page code runs. Pretends to be the
 // user's microphone and intercepts inbound WebRTC audio so an MCP-controlled
@@ -22,12 +22,12 @@
 // navigator.mediaDevices is undefined (about:blank, http: origins that
 // aren't localhost), or WebCodecs is missing, the corresponding hook is
 // skipped — the shim never throws and never blocks page load. Diagnostics
-// live on window.__qzShim regardless.
+// live on window.__voiceShim regardless.
 
 (() => {
-  const AUDIO_WS_URL = window.__QZ_AUDIO_WS_URL__ || 'ws://localhost:9091';
+  const AUDIO_WS_URL = window.__VOICE_SHIM_WS_URL__ || 'ws://localhost:9091';
   const SAMPLE_RATE = 48000;
-  const TAG = '[qz-shim]';
+  const TAG = '[voice-shim]';
 
   // --- Diagnostics object available immediately, before any risky hook. ---
   const diag = {
@@ -49,7 +49,7 @@
     get hasMediaDevices() { return !!navigator?.mediaDevices?.getUserMedia; },
     get hasWebCodecs() { return typeof AudioData !== 'undefined' && typeof MediaStreamTrackGenerator !== 'undefined'; },
   };
-  window.__qzShim = diag;
+  window.__voiceShim = diag;
   const recordError = (where, e) => {
     const msg = `${where}: ${e && e.message ? e.message : String(e)}`;
     diag.errors.push(msg);
