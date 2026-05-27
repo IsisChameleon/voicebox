@@ -358,6 +358,17 @@ camera-on flows), but we replace just the audio.
 
 #### Hook 2 — capturing the bot's voice
 
+**Important pitfall, fixed:** Daily creates *three* `RTCPeerConnection`s
+(media, data, fallback) and the same logical bot-audio track surfaces
+as a `track` event on more than one of them. Without deduplication
+we'd attach two `MediaStreamTrackProcessor`s to the same underlying
+track, *both* drain its sample stream, and *both* ship those samples
+to the WebSocket. The recorded WAV ends up "2× fast-forward" because
+the buffer accumulates twice the data over the same real-time
+interval. Fix: track tapped `track.id`s in a `Set` and skip duplicates.
+See [`shim.js:138-158`](../src/pipecat_mcp_server/shim.js).
+
+
 ```js
 // shim.js:135-184
 class WrappedRTCPeerConnection extends OrigRTCPeerConnection {
