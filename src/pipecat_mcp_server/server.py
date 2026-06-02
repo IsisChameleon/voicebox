@@ -120,7 +120,7 @@ async def start_browser_session(
     """
     audio_ws_url = f"ws://localhost:{audio_port}"
     start_pipecat_process(
-        BrowserShimRunnerArguments(host="localhost", port=audio_port, sample_rate=48000)
+        BrowserShimRunnerArguments(host="localhost", port=audio_port)
     )
     try:
         info = await asyncio.to_thread(

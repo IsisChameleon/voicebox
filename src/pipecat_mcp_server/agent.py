@@ -408,15 +408,19 @@ async def create_agent(runner_args: RunnerArguments) -> PipecatMCPAgent:
             WebsocketServerTransport,
         )
 
+        # Asymmetric rates: incoming bytes (browser tap → us) arrive at 16 kHz
+        # because Whisper-MLX requires it; outgoing bytes (Kokoro → browser
+        # mic) stay at 48 kHz so the page's AudioContext consumes them
+        # natively. RawPCMSerializer.deserialize uses its sample_rate field
+        # for the InputAudioRawFrame; serialize just passes bot frame bytes
+        # through unchanged.
         params = WebsocketServerParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
-            audio_in_sample_rate=runner_args.sample_rate,
-            audio_out_sample_rate=runner_args.sample_rate,
-            # Browser already does AEC/AGC suppression via getUserMedia
-            # constraints — leave RNNoise off here to avoid double-processing.
+            audio_in_sample_rate=runner_args.tap_rate,
+            audio_out_sample_rate=runner_args.mic_rate,
             add_wav_header=False,
-            serializer=RawPCMSerializer(sample_rate=runner_args.sample_rate),
+            serializer=RawPCMSerializer(sample_rate=runner_args.tap_rate),
         )
         transport = WebsocketServerTransport(
             params=params,

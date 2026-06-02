@@ -41,7 +41,7 @@ async def main():
 
     logger.info("=== starting pipecat in browser-shim mode ===")
     start_pipecat_process(
-        BrowserShimRunnerArguments(host="localhost", port=audio_port, sample_rate=48000)
+        BrowserShimRunnerArguments(host="localhost", port=audio_port)
     )
 
     # Give pipecat a moment to bind the WS port.

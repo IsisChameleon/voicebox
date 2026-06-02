@@ -6,8 +6,8 @@
 // being aware of the indirection.
 //
 // Wire format on the WebSocket: raw little-endian 16-bit signed PCM, mono.
-// Sample rate is fixed at SAMPLE_RATE (set to match WebsocketServerParams on
-// the Python side; pipecat resamples internally for the rest of the pipeline).
+// Two sample rates: MIC_RATE (48 kHz) for inbound Kokoro playback to the
+// page, TAP_RATE (16 kHz) for outbound capture to pipecat — matches Whisper.
 //
 // Hook surfaces:
 //   1. navigator.mediaDevices.getUserMedia({audio}) returns a synthetic
@@ -26,7 +26,15 @@
 
 (() => {
   const AUDIO_WS_URL = window.__VOICE_SHIM_WS_URL__ || 'ws://localhost:9091';
-  const SAMPLE_RATE = 48000;
+  // Kokoro → fake-mic playback (browser side): stay at 48 kHz to match
+  // the page's native AudioContext and avoid quality loss.
+  const MIC_RATE = 48000;
+  // Remote-track → pipecat tap: Whisper-MLX expects 16 kHz audio
+  // (mlx_whisper.transcribe has no sample_rate parameter — it always
+  // treats input as 16 kHz). Capture at 16 kHz here so we don't have to
+  // resample on the pipecat side. Web Audio handles the 48→16 conversion
+  // inside MediaStreamAudioSourceNode → AudioContext({sampleRate: 16000}).
+  const TAP_RATE = 16000;
   const TAG = '[voice-shim]';
 
   // --- Diagnostics object available immediately, before any risky hook. ---
@@ -93,7 +101,7 @@
         for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
         const frame = new AudioData({
           format: 'f32',
-          sampleRate: SAMPLE_RATE,
+          sampleRate: MIC_RATE,
           numberOfFrames: float32.length,
           numberOfChannels: 1,
           timestamp: performance.now() * 1000,
@@ -145,25 +153,90 @@
     console.log(TAG, 'skipping getUserMedia hook (insecure context or missing WebCodecs)');
   }
 
-  // --- Hook 2: RTCPeerConnection wrap (only if RTCPeerConnection + WebCodecs). ---
-  if (typeof RTCPeerConnection !== 'undefined' && typeof MediaStreamTrackProcessor !== 'undefined') {
+  // --- Hook 2: RTCPeerConnection wrap. ---
+  //
+  // Tap the remote audio track via Web Audio (MediaStreamAudioSourceNode +
+  // AudioWorkletNode), NOT MediaStreamTrackProcessor.
+  //
+  // Why: MediaStreamTrackProcessor is a side-channel on the WebCodecs path
+  // that only emits AudioData chunks when the source produces samples — on
+  // a remote WebRTC track, silence periods produce *no* chunks at all. We'd
+  // then ship a sparse byte stream to pipecat, which has no notion of "this
+  // chunk arrived 800 ms after the previous one", and the recorded WAV
+  // sounds 3× sped up because all the pauses are elided.
+  //
+  // Web Audio is pulled by the AudioContext at a fixed sample rate. The
+  // source node's internal jitter buffer fills silence with zeros, so the
+  // worklet's process() callback receives a continuous stream of Float32
+  // samples regardless of whether the bot is talking. End-of-pipe duration
+  // = wall-clock duration, which is what AudioBufferProcessor expects.
+  const hasWebAudio = typeof AudioContext !== 'undefined' && typeof AudioWorkletNode !== 'undefined';
+  if (typeof RTCPeerConnection !== 'undefined' && hasWebAudio) {
     try {
       const OrigRTCPeerConnection = window.RTCPeerConnection;
 
       // Daily creates multiple RTCPeerConnections (media, data, fallback). The
       // same logical bot audio can surface as a `track` event on more than one
       // of them, or even fire multiple times on the same one (renegotiation,
-      // ICE restart). If we naively tap every event we'd ship the same
-      // samples N times to pipecat — the recorded WAV ends up "fast forward"
-      // because the buffer accumulates Nx audio over the same real-time
-      // interval. Deduplicate by track.id.
+      // ICE restart). Deduplicate by track.id.
       const tappedTrackIds = new Set();
+
+      // AudioWorklet processor source — registered once via a Blob URL.
+      // process() is called every 128 frames at the AudioContext's sample
+      // rate (~2.67 ms at 48 kHz). We convert Float32 → Int16 and forward
+      // the buffer to the main thread via port.postMessage.
+      const WORKLET_SRC = `
+        class PcmCapture extends AudioWorkletProcessor {
+          process(inputs) {
+            const input = inputs[0];
+            if (!input || !input[0]) return true;
+            const f32 = input[0];
+            const n = f32.length;
+            const i16 = new Int16Array(n);
+            for (let i = 0; i < n; i++) {
+              const s = Math.max(-1, Math.min(1, f32[i]));
+              i16[i] = s < 0 ? s * 32768 : s * 32767;
+            }
+            this.port.postMessage(i16.buffer, [i16.buffer]);
+            return true;
+          }
+        }
+        registerProcessor('pcm-capture', PcmCapture);
+      `;
+      const workletUrl = URL.createObjectURL(
+        new Blob([WORKLET_SRC], { type: 'application/javascript' })
+      );
+
+      // One AudioContext for the whole shim — created lazily on first tap.
+      // Constructed at TAP_RATE (16 kHz) so the worklet emits Whisper-ready
+      // samples and pipecat doesn't need to resample on the WS side.
+      let audioCtx = null;
+      let workletReady = null;
+      const ensureAudioCtx = async () => {
+        if (audioCtx) {
+          await workletReady;
+          return audioCtx;
+        }
+        audioCtx = new AudioContext({ sampleRate: TAP_RATE });
+        workletReady = audioCtx.audioWorklet.addModule(workletUrl);
+        await workletReady;
+        // Some Chromium builds start the context in 'suspended' state even
+        // with autoplay-allowed flags — explicitly resume so the graph ticks.
+        if (audioCtx.state === 'suspended') {
+          try { await audioCtx.resume(); } catch (e) { recordError('audioCtx.resume', e); }
+        }
+        console.log(TAG, 'AudioContext ready', {
+          sampleRate: audioCtx.sampleRate,
+          state: audioCtx.state,
+        });
+        return audioCtx;
+      };
 
       class WrappedRTCPeerConnection extends OrigRTCPeerConnection {
         constructor(...args) {
           super(...args);
           diag.pcCount++;
-          this.addEventListener('track', (ev) => {
+          this.addEventListener('track', async (ev) => {
             const track = ev.track;
             if (!track || track.kind !== 'audio') return;
             if (tappedTrackIds.has(track.id)) {
@@ -174,61 +247,50 @@
             track.addEventListener('ended', () => tappedTrackIds.delete(track.id));
             diag.audioTrackCount++;
             console.log(TAG, 'tee-ing remote audio track', track.id);
-            let processor;
+
+            let ctx;
             try {
-              processor = new MediaStreamTrackProcessor({ track });
+              ctx = await ensureAudioCtx();
             } catch (e) {
-              recordError('MediaStreamTrackProcessor construct', e);
+              recordError('AudioContext init', e);
               return;
             }
-            const reader = processor.readable.getReader();
-            (async () => {
-              while (true) {
-                let chunk;
+            if (diag.outboundSampleRate === null) {
+              diag.outboundSampleRate = ctx.sampleRate;
+              diag.outboundNumChannels = 1;
+              diag.outboundFormat = 'webaudio-f32';
+            }
+
+            let source, node;
+            try {
+              source = ctx.createMediaStreamSource(new MediaStream([track]));
+              // numberOfOutputs: 0 → pure sink. The node still ticks because
+              // its input is connected; we don't connect to ctx.destination
+              // (the page already plays the audio out the real speakers).
+              node = new AudioWorkletNode(ctx, 'pcm-capture', { numberOfOutputs: 0 });
+            } catch (e) {
+              recordError('Web Audio graph construct', e);
+              return;
+            }
+            node.port.onmessage = (msg) => {
+              const buf = msg.data;
+              if (!(buf instanceof ArrayBuffer)) return;
+              if (diag.wsReady && ws && ws.readyState === WebSocket.OPEN) {
                 try {
-                  chunk = await reader.read();
-                } catch {
-                  break;
-                }
-                if (chunk.done) break;
-                const value = chunk.value;
-                if (diag.outboundSampleRate === null) {
-                  diag.outboundSampleRate = value.sampleRate;
-                  diag.outboundNumChannels = value.numberOfChannels;
-                  diag.outboundFormat = value.format;
-                  console.log(TAG, 'first outbound AudioData', {
-                    sampleRate: value.sampleRate,
-                    numberOfChannels: value.numberOfChannels,
-                    numberOfFrames: value.numberOfFrames,
-                    format: value.format,
-                  });
-                }
-                const n = value.numberOfFrames;
-                const float32 = new Float32Array(n);
-                try {
-                  value.copyTo(float32, { planeIndex: 0 });
+                  ws.send(buf);
+                  diag.outboundChunks++;
+                  diag.perTrackBytes[track.id] =
+                    (diag.perTrackBytes[track.id] || 0) + buf.byteLength;
                 } catch (e) {
-                  value.close();
-                  continue;
+                  recordError('ws.send outbound', e);
                 }
-                const int16 = new Int16Array(n);
-                for (let i = 0; i < n; i++) {
-                  const s = Math.max(-1, Math.min(1, float32[i]));
-                  int16[i] = s < 0 ? s * 32768 : s * 32767;
-                }
-                if (diag.wsReady && ws && ws.readyState === WebSocket.OPEN) {
-                  try {
-                    ws.send(int16.buffer);
-                    diag.outboundChunks++;
-                    diag.perTrackBytes[track.id] =
-                      (diag.perTrackBytes[track.id] || 0) + int16.byteLength;
-                  } catch (e) {
-                    recordError('ws.send outbound', e);
-                  }
-                }
-                value.close();
               }
-            })();
+            };
+            source.connect(node);
+            track.addEventListener('ended', () => {
+              try { source.disconnect(); } catch {}
+              try { node.disconnect(); } catch {}
+            });
           });
         }
       }
