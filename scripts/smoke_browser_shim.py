@@ -27,13 +27,13 @@ logger.add(sys.stderr, level="INFO")
 
 
 async def main():
-    from pipecat_mcp_server.agent_ipc import (
+    from voicebox.agent_ipc import (
         send_command,
         start_pipecat_process,
         stop_pipecat_process,
     )
-    from pipecat_mcp_server.browser_session import start_browser, stop_browser
-    from pipecat_mcp_server.runner_args import BrowserShimRunnerArguments
+    from voicebox.browser_session import start_browser, stop_browser
+    from voicebox.runner_args import BrowserShimRunnerArguments
 
     audio_port = 9091
     cdp_port = 9222

@@ -1,159 +1,18 @@
 # Changelog
 
-All notable changes to **qz-mcp-server** will be documented in this file.
+All notable changes to **voicebox** will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Removed
+Initial release: an MCP server that gives an LLM agent voice + ears in a
+browser. The agent drives a Playwright-controlled Chromium with an audio
+shim injected; the shim hijacks the page's microphone (fed by Kokoro TTS
+from this server) and tees the page's WebRTC remote audio into Whisper.
+The agent can then act as a synthetic voice user against any web voice
+app — Daily, LiveKit, plain `RTCPeerConnection`, anything that uses
+`getUserMedia` + WebRTC — without the app being aware of the indirection.
 
-- Legacy Toocan/Daily direct-peer mode: `start_call` MCP tool, the
-  `DailyRunnerArguments` branch in `create_agent`, and `daily-python` extras.
-- Upstream-inherited screen-sharing tools (`list_windows`, `screen_capture`,
-  `capture_screenshot`) along with their processors, macOS ScreenCaptureKit
-  bindings, and the linux X11 backend.
-- Legacy docs (`architecture-notes.md`, `architecture-diagram.excalidraw`)
-  describing the Toocan flow.
-
-### Added
-
-- Forked from `pipecat-ai/pipecat-mcp-server` as `qz-mcp-server` — an MCP
-  server that drives a synthetic voice user against a Quarterzip/Toocan bot
-  for end-to-end voice testing.
-- New `start_call(deployment_id)` MCP tool: posts to the local Toocan
-  backend (`POST /call/pipecat/start`) to create a Daily room and spawn
-  the bot, then joins that same room as the synthetic user.
-- `listen()` now accepts a `timeout` parameter (default 30s) and returns
-  `""` on timeout instead of blocking indefinitely.
-
-### Changed
-
-- Bumped Pipecat from 0.0.103 to 1.2.1 and `daily-python` to 0.28+ to
-  match the bot's Pipecat 1.x line.
-- `KokoroTTSService.run_tts` signature updated for the Pipecat 1.x
-  `(text, context_id)` API.
-- `PipelineTask` created with `enable_rtvi=False`. We are a headless
-  synthetic user (no UI client subscribed to the data channel), so the
-  default RTVI processor would otherwise enter a validation-error
-  feedback loop with the bot on every server-side event.
-- `speak()` and `listen()` now wait for the Daily transport's
-  `on_client_connected` event before pushing frames, so the first
-  greeting can't be queued before the room is actually joined.
-- FastMCP runs with `stateless_http=True, json_response=True` — the
-  recommended config for streamable-HTTP servers under MCP 2025-11-25.
-- `mcp` dependency pinned to `>=1.26` and `requires-python` raised to
-  `>=3.11` (Pipecat 1.x dropped 3.10).
-
-## [0.0.12] - 2026-02-10
-
-### Fixed
-
-- Fixed an issue where multiprocessing queues were not properly closed during
-  cleanup, which could cause resource leaks.
-  
-- Increased process join timeout from 1s to 5s for more reliable shutdown.
-
-## [0.0.11] - 2026-02-02
-
-### Added
-
-- New `capture_screenshot()` MCP tool that captures the current screen frame and
-  returns an image path. This allows the agent to visually analyze what's on
-  screen and help with debugging, UI feedback, and more.
-
-## [0.0.10] - 2026-02-01
-
-### Added
-
-- New `list_windows()` MCP tool to list all open windows with title, app name,
-  and window ID.
-
-- New `screen_capture(window_id)` MCP tool to start or switch screen capture to
-  a specific window or full screen during a voice conversation.
-
-### Changed
-
-- Screen capture dependencies are now included by default (no longer an optional
-  `[screen]` extra).
-
-- Screen capture is no longer configured via environment variables
-  (`PIPECAT_MCP_SERVER_SCREEN_CAPTURE`, `PIPECAT_MCP_SERVER_SCREEN_WINDOW`).
-  Use the `list_windows()` and `screen_capture()` tools instead.
-
-## [0.0.9] - 2026-01-31
-
-### Changed
-
-- Linux X11 screen capture backend using python-xlib.
-
-- Native macOS screen capture using ScreenCaptureKit. Supports true window-level
-  capture not affected by overlapping windows.
-
-## [0.0.8] - 2026-01-31
-
-### Changed
-
-- Updated to Pipecat >= 0.0.101.
-
-## [0.0.7] - 2026-01-31
-
-### Changed
-
-- `KokoroTTSService` now uses `kokoro-onnx`.
-
-## [0.0.6] - 2026-01-29
-
-### Added
-
-- Added `KokoroTTSService` processor.
-
-- Added noise cancellation with `RNNoiseFilter`.
-
-- Simplified the `/pipecat` skill instructions.
-
-### Changed
-
-- Replaced third-party STT/TTS services (Deepgram, Cartesia) with local models:
-  Faster Whisper for speech-to-text and Kokoro for text-to-speech. No API keys
-  required.
-
-## [0.0.5] - 2026-01-28
-
-### Fixed
-
-- Fixed an issue that would cause an MCP session to crash and would force the
-  MCP client to reconnect each time.
-
-## [0.0.4] - 2026-01-26
-
-### Fixed
-
-- Fixed an issue where Daily clients couldn't reconnect after disconnecting.
-
-## [0.0.3] - 2026-01-26
-
-### Fixed
-
-- Fixed premature exit of the `/pipecat` skill when user responds with phrases
-  like "no", "nothing", or "that's it" instead of explicit ending phrases.
-
-- Fixed an issue where WebRTC clients couldn't reconnect after disconnecting.
-  The agent now properly handles disconnect/reconnect cycles.
-
-- Fixed an issue where `pipecat-mcp-server` could hang indefinitely after
-  pressing Ctrl-C.
-
-## [0.0.2] - 2026-01-26
-
-### Fixed
-
-- Fixed an issue that would cause the Pipecat agent to not load if the optional
-  `daily` dependency was not installed.
-
-- Added missing support for `telnyx`, `plivo` and `exotel` telephony providers.
-
-## [0.0.1] - 2026-01-26
-
-Initial public release.
+Tools exposed over MCP: `start_browser_session`, `speak`, `listen`, `stop`.

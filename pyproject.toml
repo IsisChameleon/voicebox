@@ -3,9 +3,9 @@ requires = ["setuptools>=64", "setuptools_scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "qz-mcp-server"
+name = "voicebox"
 dynamic = ["version"]
-description = "MCP server that drives a synthetic voice user against browser-based voice apps via a Playwright-controlled Chromium with an audio shim."
+description = "MCP server that gives an LLM agent voice + ears in a browser, to act as a synthetic voice user against any web voice app."
 license = "BSD-2-Clause"
 license-files = ["LICENSE"]
 readme = "README.md"
@@ -32,8 +32,8 @@ dependencies = [
 ]
 
 [project.urls]
-Source = "https://github.com/IsisChameleon/qz-mcp-server"
-Issues = "https://github.com/IsisChameleon/qz-mcp-server/issues"
+Source = "https://github.com/IsisChameleon/voicebox"
+Issues = "https://github.com/IsisChameleon/voicebox/issues"
 
 [dependency-groups]
 dev = [
@@ -46,7 +46,7 @@ dev = [
 ]
 
 [project.scripts]
-qz-mcp-server = "pipecat_mcp_server.server:main"
+voicebox = "voicebox.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

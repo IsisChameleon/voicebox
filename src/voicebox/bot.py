@@ -16,8 +16,8 @@ import asyncio
 from loguru import logger
 from pipecat.runner.types import RunnerArguments
 
-from pipecat_mcp_server.agent import create_agent
-from pipecat_mcp_server.agent_ipc import read_request, send_response
+from voicebox.agent import create_agent
+from voicebox.agent_ipc import read_request, send_response
 
 
 async def bot(runner_args: RunnerArguments):

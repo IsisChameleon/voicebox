@@ -15,7 +15,7 @@ logger.remove()
 logger.add(sys.stderr, level="INFO")
 
 
-SHIM_PATH = Path(__file__).resolve().parent.parent / "src" / "pipecat_mcp_server" / "shim.js"
+SHIM_PATH = Path(__file__).resolve().parent.parent / "src" / "voicebox" / "shim.js"
 
 
 async def main(headless: bool):

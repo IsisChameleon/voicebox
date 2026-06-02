@@ -119,7 +119,7 @@ def run_pipecat_process(
 
     import asyncio
 
-    from pipecat_mcp_server.bot import bot as bot_fn
+    from voicebox.bot import bot as bot_fn
 
     _cmd_queue = cmd_queue
     _response_queue = response_queue

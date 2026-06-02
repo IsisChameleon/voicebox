@@ -20,9 +20,9 @@ import sys
 from loguru import logger
 from mcp.server.fastmcp import FastMCP
 
-from pipecat_mcp_server.agent_ipc import send_command, start_pipecat_process, stop_pipecat_process
-from pipecat_mcp_server.browser_session import start_browser, stop_browser
-from pipecat_mcp_server.runner_args import BrowserShimRunnerArguments
+from voicebox.agent_ipc import send_command, start_pipecat_process, stop_pipecat_process
+from voicebox.browser_session import start_browser, stop_browser
+from voicebox.runner_args import BrowserShimRunnerArguments
 
 logger.remove()
 logger.add(sys.stderr, level="DEBUG")
@@ -30,7 +30,7 @@ logger.add(sys.stderr, level="DEBUG")
 # Create MCP server. Stateless + json_response per the MCP 2025-11-25 recommended
 # config for streamable-http servers — no session bookkeeping, no SSE.
 mcp = FastMCP(
-    name="qz-mcp-server",
+    name="voicebox",
     host="localhost",
     port=9090,
     stateless_http=True,

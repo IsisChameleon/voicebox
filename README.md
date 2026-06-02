@@ -1,15 +1,11 @@
-# qz-mcp-server
+# voicebox
 
-MCP server that lets an LLM client (Claude Code, Cursor, Codex, ...) act as a **synthetic voice user** against any browser-based voice app — without that app being aware of the indirection.
-
-The LLM drives a Playwright-controlled Chromium with an audio shim injected. The shim hijacks the page's microphone (fed by Kokoro TTS from this server) and tees the bot's remote WebRTC audio back to Whisper, so the LLM can speak/listen via MCP tools while a real client UI runs in the foreground.
-
-Forked from [`pipecat-ai/pipecat-mcp-server`](https://github.com/pipecat-ai/pipecat-mcp-server).
+MCP server that gives an LLM agent **voice + ears in a browser**. The agent drives a Playwright-controlled Chromium with an audio shim injected; the shim hijacks the page's microphone (fed by Kokoro TTS from this server) and tees the bot's remote WebRTC audio back to Whisper. The LLM can then act as a synthetic voice user against any web voice app — Daily, LiveKit, plain `RTCPeerConnection`, anything that uses `getUserMedia` + WebRTC — without the app being aware of the indirection.
 
 ## Topology
 
 ```
-Claude (LLM) ─HTTP/JSON-RPC─► qz-mcp-server ─multiprocessing.Queue─► Pipecat child (WebsocketServerTransport)
+Claude (LLM) ─HTTP/JSON-RPC─► voicebox ────multiprocessing.Queue──► Pipecat child (WebsocketServerTransport)
                                     │                                       ▲
                                     │                                       │ raw 16-bit PCM
                                     │                                       │ (Kokoro 48 kHz out,
@@ -34,14 +30,14 @@ By default the agent uses local models — Whisper for STT, Kokoro for TTS — s
 ## Install
 
 ```bash
-git clone https://github.com/IsisChameleon/qz-mcp-server.git
-uv tool install -e /path/to/qz-mcp-server
+git clone https://github.com/IsisChameleon/voicebox.git
+uv tool install -e /path/to/voicebox
 ```
 
 ## Run
 
 ```bash
-qz-mcp-server
+voicebox
 ```
 
 The server listens on `http://localhost:9090/mcp` (streamable-HTTP transport).
@@ -51,13 +47,13 @@ The server listens on `http://localhost:9090/mcp` (streamable-HTTP transport).
 Claude Code:
 
 ```bash
-claude mcp add qz-voice-test --transport http http://localhost:9090/mcp --scope user
+claude mcp add voicebox --transport http http://localhost:9090/mcp --scope user
 ```
 
 Cursor (`~/.cursor/mcp.json`):
 
 ```json
-{ "mcpServers": { "qz-voice-test": { "url": "http://localhost:9090/mcp" } } }
+{ "mcpServers": { "voicebox": { "url": "http://localhost:9090/mcp" } } }
 ```
 
 ## MCP tools

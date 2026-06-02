@@ -45,9 +45,9 @@ from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
 )
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
-from pipecat_mcp_server.processors.kokoro_tts import KokoroTTSService
-from pipecat_mcp_server.raw_pcm_serializer import RawPCMSerializer
-from pipecat_mcp_server.runner_args import BrowserShimRunnerArguments
+from voicebox.processors.kokoro_tts import KokoroTTSService
+from voicebox.raw_pcm_serializer import RawPCMSerializer
+from voicebox.runner_args import BrowserShimRunnerArguments
 
 load_dotenv(override=True)
 
