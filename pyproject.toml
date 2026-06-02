@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "qz-mcp-server"
 dynamic = ["version"]
-description = "MCP server for voice-testing Quarterzip agents"
+description = "MCP server that drives a synthetic voice user against browser-based voice apps via a Playwright-controlled Chromium with an audio shim."
 license = "BSD-2-Clause"
 license-files = ["LICENSE"]
 readme = "README.md"
@@ -16,7 +16,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "Topic :: Communications :: Conferencing",
     "Topic :: Multimedia :: Sound/Audio",
-    "Topic :: Multimedia :: Video",
     "Topic :: Scientific/Engineering :: Artificial Intelligence"
 ]
 dependencies = [
@@ -24,24 +23,17 @@ dependencies = [
     "loguru>=0.7.0,<1",
     "mcp>=1.26",
     "pip>=25.3",
-    "pipecat-ai[cartesia,deepgram,local-smart-turn-v3,rnnoise,runner,silero,webrtc,websocket]>=1.1.0",
+    "pipecat-ai[local-smart-turn,runner,silero,websocket]>=1.1.0",
     "pipecat-ai[mlx-whisper]>=1.1.0; sys_platform == 'darwin'",
     "pipecat-ai[whisper]>=1.1.0; sys_platform != 'darwin'",
     "playwright>=1.50,<2",
-    "pyobjc-framework-CoreMedia>=11.0; sys_platform == 'darwin'",
-    "pyobjc-framework-Quartz>=11.0; sys_platform == 'darwin'",
-    "pyobjc-framework-ScreenCaptureKit>=11.0; sys_platform == 'darwin'",
     "python-dotenv>=1.0.0,<2",
-    "python-xlib>=0.33; sys_platform == 'linux'",
     "requests>=2.32.5,<3",
 ]
 
 [project.urls]
 Source = "https://github.com/IsisChameleon/qz-mcp-server"
 Issues = "https://github.com/IsisChameleon/qz-mcp-server/issues"
-
-[project.optional-dependencies]
-daily = [ "daily-python>=0.28.0" ]
 
 [dependency-groups]
 dev = [

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- Legacy Toocan/Daily direct-peer mode: `start_call` MCP tool, the
+  `DailyRunnerArguments` branch in `create_agent`, and `daily-python` extras.
+- Upstream-inherited screen-sharing tools (`list_windows`, `screen_capture`,
+  `capture_screenshot`) along with their processors, macOS ScreenCaptureKit
+  bindings, and the linux X11 backend.
+- Legacy docs (`architecture-notes.md`, `architecture-diagram.excalidraw`)
+  describing the Toocan flow.
+
 ### Added
 
 - Forked from `pipecat-ai/pipecat-mcp-server` as `qz-mcp-server` — an MCP

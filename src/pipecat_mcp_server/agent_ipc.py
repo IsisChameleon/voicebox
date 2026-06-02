@@ -67,10 +67,8 @@ def start_pipecat_process(runner_args):
     Cleans up any existing process before starting a new one.
 
     Args:
-        runner_args: A pipecat ``RunnerArguments`` subclass instance —
-            either ``DailyRunnerArguments`` (peer-to-Daily, bot mode) or
-            ``BrowserShimRunnerArguments`` (WebSocket server for the
-            in-browser shim).
+        runner_args: A ``BrowserShimRunnerArguments`` instance (WebSocket
+            server for the in-browser shim).
 
     """
     global _cmd_queue, _response_queue, _pipecat_process
@@ -113,8 +111,8 @@ def run_pipecat_process(
     Args:
         cmd_queue: Queue for receiving commands from the MCP server.
         response_queue: Queue for sending responses back to the MCP server.
-        runner_args: A ``RunnerArguments`` subclass instance (Daily,
-            browser-shim, etc.) — dispatched by ``create_agent``.
+        runner_args: A ``BrowserShimRunnerArguments`` instance —
+            dispatched by ``create_agent``.
 
     """
     global _cmd_queue, _response_queue
