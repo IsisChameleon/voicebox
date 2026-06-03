@@ -15,6 +15,7 @@ Exposes voice tools via MCP so an LLM client can:
 """
 
 import asyncio
+import socket
 import sys
 
 from loguru import logger
@@ -38,12 +39,46 @@ mcp = FastMCP(
 )
 
 
+def _assert_port_free(port: int, name: str):
+    """Raise a clear error if ``port`` is already bound on localhost.
+
+    Catches the common "another voicebox session is already running" case. The
+    raised message is surfaced to the calling LLM as the tool's error result
+    (FastMCP wraps it into an ``isError`` ``CallToolResult``), so it names the
+    exact ``start_browser_session`` argument to retry with — not a human-facing
+    config knob.
+
+    Args:
+        port: TCP port to probe on localhost.
+        name: The ``start_browser_session`` parameter this port came from —
+            ``"audio_port"`` or ``"cdp_port"``. Used verbatim in the error
+            message so the LLM knows which argument to change on retry.
+
+    Raises:
+        RuntimeError: If ``port`` is already bound (e.g. a prior session is
+            still listening on it).
+
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(("localhost", port))
+    except OSError as e:
+        raise RuntimeError(
+            f"{name} port {port} is already in use — another voicebox session "
+            f"may be running. Pass a different {name} to start_browser_session."
+        ) from e
+    finally:
+        sock.close()
+
+
 @mcp.tool()
 async def start_browser_session(
     url: str = "http://localhost:3000",
     headless: bool = False,
     cdp_port: int = 9222,
     audio_port: int = 9091,
+    user_data_dir: str | None = None,
 ) -> dict:
     """Launch a Playwright-controlled Chromium with the browser audio shim injected.
 
@@ -53,23 +88,31 @@ async def start_browser_session(
     voice app — without the app being aware of the indirection.
 
     The returned ``cdp_endpoint`` is the URL an external Playwright client
-    (e.g. ``@playwright/mcp``, playwright-cli) should ``connect_over_cdp``
-    against to drive the UI (login, navigate, click "Start reading", etc).
+    (e.g. ``@playwright/mcp`` launched with ``--cdp-endpoint``, or your own
+    ``chromium.connect_over_cdp``) should attach to in order to drive the UI
+    (login, navigate, click "Start reading", etc).
+
+    To skip logging in every run, pass ``user_data_dir`` (a persistent Chrome
+    profile): log in once and the profile keeps you authenticated on every later
+    run with the same dir — no save step.
 
     Args:
         url: Initial URL to open (e.g. the app's home page).
-        headless: Run Chromium headless. Default false so you can watch.
+        headless: Run Chromium headless. Default false so you can watch. The
+            audio path works headless too.
         cdp_port: Chromium remote-debugging port.
         audio_port: Local port the WebSocket audio transport listens on.
+        user_data_dir: Persistent Chrome profile dir to reuse an authenticated
+            session across runs.
 
     Returns:
         ``{cdp_endpoint, audio_ws_url}``.
 
     """
+    _assert_port_free(audio_port, "audio_port")
+    _assert_port_free(cdp_port, "cdp_port")
     audio_ws_url = f"ws://localhost:{audio_port}"
-    start_pipecat_process(
-        BrowserShimRunnerArguments(host="localhost", port=audio_port)
-    )
+    start_pipecat_process(BrowserShimRunnerArguments(host="localhost", port=audio_port))
     try:
         info = await asyncio.to_thread(
             start_browser,
@@ -77,6 +120,7 @@ async def start_browser_session(
             audio_ws_url=audio_ws_url,
             cdp_port=cdp_port,
             headless=headless,
+            user_data_dir=user_data_dir,
         )
     except Exception:
         stop_pipecat_process()

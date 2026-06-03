@@ -40,6 +40,11 @@ def start_browser(
 ) -> dict:
     """Launch Chromium with the shim pre-injected. Blocks until the page is loaded.
 
+    ``user_data_dir`` reuses a full persistent Chrome profile so callers don't
+    have to log in every run; the profile lives in the browser's default
+    context, which is CDP-coherent (an attached client both drives and shares
+    its cookies).
+
     Returns a dict with ``cdp_endpoint`` (HTTP URL for ``connect_over_cdp``)
     and ``audio_ws_url``.
     """
@@ -51,17 +56,22 @@ def start_browser(
     _stop_event = multiprocessing.Event()
     _browser_process = multiprocessing.Process(
         target=_run_browser,
-        args=(url, audio_ws_url, cdp_port, headless, user_data_dir,
-              _ready_event, _stop_event),
+        args=(
+            url,
+            audio_ws_url,
+            cdp_port,
+            headless,
+            user_data_dir,
+            _ready_event,
+            _stop_event,
+        ),
     )
     _browser_process.start()
     logger.debug(f"Browser child process PID {_browser_process.ident}")
 
     if not _ready_event.wait(timeout=startup_timeout):
         stop_browser()
-        raise RuntimeError(
-            f"Browser failed to become ready within {startup_timeout}s"
-        )
+        raise RuntimeError(f"Browser failed to become ready within {startup_timeout}s")
 
     return {
         "cdp_endpoint": f"http://localhost:{cdp_port}",
@@ -107,8 +117,13 @@ def _run_browser(
 
     asyncio.run(
         _run_browser_async(
-            url, audio_ws_url, cdp_port, headless, user_data_dir,
-            ready_event, stop_event,
+            url,
+            audio_ws_url,
+            cdp_port,
+            headless,
+            user_data_dir,
+            ready_event,
+            stop_event,
         )
     )
 
@@ -127,9 +142,7 @@ async def _run_browser_async(
     from playwright.async_api import async_playwright
 
     shim_src = SHIM_PATH.read_text(encoding="utf-8")
-    init_script = (
-        f"window.__VOICE_SHIM_WS_URL__ = {audio_ws_url!r};\n{shim_src}"
-    )
+    init_script = f"window.__VOICE_SHIM_WS_URL__ = {audio_ws_url!r};\n{shim_src}"
 
     chromium_args = [
         f"--remote-debugging-port={cdp_port}",
@@ -163,9 +176,7 @@ async def _run_browser_async(
         except Exception as e:
             logger.error(f"page.goto failed: {e}")
 
-        logger.info(
-            f"Browser ready. CDP: http://localhost:{cdp_port} | audio: {audio_ws_url}"
-        )
+        logger.info(f"Browser ready. CDP: http://localhost:{cdp_port} | audio: {audio_ws_url}")
         ready_event.set()
 
         try:

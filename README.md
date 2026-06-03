@@ -60,7 +60,7 @@ Cursor (`~/.cursor/mcp.json`):
 
 | Tool | Purpose |
 |---|---|
-| `start_browser_session(url, headless?, cdp_port?, audio_port?)` | Launch a Playwright Chromium with the audio shim injected, navigate to `url`, expose CDP. The shim hijacks the page's mic (fed by Kokoro) and tees the page's WebRTC remote audio into Whisper. Returns `{cdp_endpoint, audio_ws_url}`. Drive the UI with any Playwright client that can `connect_over_cdp`. |
+| `start_browser_session(url, headless?, cdp_port?, audio_port?, user_data_dir?)` | Launch a Playwright Chromium with the audio shim injected, navigate to `url`, expose CDP. The shim hijacks the page's mic (fed by Kokoro) and tees the page's WebRTC remote audio into Whisper. Returns `{cdp_endpoint, audio_ws_url}`. Drive the UI with any Playwright client that can attach over CDP (see below). Pass `user_data_dir` (a persistent Chrome profile) to reuse an authenticated session: log in once and stay logged in on later runs with the same dir. |
 | `speak(text)` | Synthesize `text` with Kokoro TTS and stream it into the shim's synthetic mic. Returns when frames are queued — not when audio has finished playing. |
 | `listen(timeout=30)` | Block until the other side completes an utterance (VAD-segmented). Returns the transcribed text, or `""` on timeout. A long reply produces multiple utterances; call `listen()` in a loop. |
 | `stop()` | Tear down the pipecat agent and close the Chromium session. |
@@ -72,12 +72,17 @@ Cursor (`~/.cursor/mcp.json`):
 {"name": "start_browser_session", "arguments": {"url": "http://localhost:3000"}}
 // → {"cdp_endpoint": "http://localhost:9222", "audio_ws_url": "ws://localhost:9091"}
 
-// 2. attach a Playwright client (any flavor: @playwright/mcp, playwright-cli, your own)
-//    via chromium.connect_over_cdp("http://localhost:9222") and drive the UI:
-//      - log in
-//      - navigate to the book / "Start reading" / whatever the call entry point is
-//    The page calls getUserMedia → the shim returns a synthetic mic stream that
-//    the MCP server feeds.
+// 2. attach a Playwright client to that cdp_endpoint and drive the UI
+//    (log in, navigate to the book / "Start reading" / whatever the entry point is).
+//    The page then calls getUserMedia → the shim returns a synthetic mic stream
+//    the MCP server feeds. Pick whichever client you already have:
+//
+//      @playwright/mcp:   npx @playwright/mcp@latest --cdp-endpoint=http://localhost:9222
+//                         (it attaches to our browser instead of launching its own;
+//                          leave its --user-data-dir unset — incompatible with --cdp-endpoint.
+//                          Persist auth via this server's user_data_dir instead.)
+//      your own script:   browser = await playwright.chromium.connect_over_cdp("http://localhost:9222")
+//                         (see scripts/e2e_readme_call.py for a full login→navigate→call driver)
 
 // 3. speak — the page's WebRTC peer sends OUR Kokoro audio to the bot
 {"name": "speak", "arguments": {"text": "Hi Ember! Tell me about this book."}}
@@ -159,9 +164,10 @@ login → navigate → call → conversation → end against the readme app.
 - **Sample-rate split is asymmetric on the wire:** `audio_in_sample_rate=16000` (browser → pipecat), `audio_out_sample_rate=48000` (pipecat → browser). The `AudioBufferProcessor` resamples internally so the recorded WAVs come out at 48 kHz regardless.
 - **VAD `stop_secs=1.0s`** captures complete utterances over WebRTC with natural pauses; pipecat's default 0.2 s (tuned for clean TTS sources) chops remote speech mid-sentence.
 - **The shim taps audio via Web Audio, not WebCodecs**, because `MediaStreamTrackProcessor` only emits chunks during active speech on a remote WebRTC track — silence is dropped, so a sparse byte stream reaches pipecat and the recorded WAV plays back several times faster than real time. Web Audio is pulled by the AudioContext clock and fills silence with zero samples.
-- **Headless Chromium works**, but the shim relies on Web Audio + `MediaStreamTrackGenerator` (modern Chromium-only). Tested with Playwright 1.50 + bundled Chromium.
+- **Headless Chromium works, audio path included** — `headless=true` still captures the bot's audio and feeds the synthetic mic (the tap is Web Audio, not a visible window). The shim relies on Web Audio + `MediaStreamTrackGenerator` (modern Chromium-only). Tested with Playwright 1.50 + bundled Chromium.
 - **`RTCPeerConnection` wrap won't catch peer connections inside cross-origin iframes or Web Workers.** Not an issue for the readme app, but a real limitation for apps using Daily Prebuilt's `<DailyIframe>` (workaround: hook `<audio>` elements via `MutationObserver` + `captureStream()`).
-- **One session at a time.** The server pins ports 9090 (MCP), 9091 (audio WS), 9222 (CDP). Two parallel sessions need port overrides.
+- **One session at a time.** The server pins ports 9090 (MCP), 9091 (audio WS), 9222 (CDP). `start_browser_session` checks `audio_port`/`cdp_port` are free first and fails with a clear message if not — pass overrides to run a second session in parallel.
+- **Session reuse uses `user_data_dir`.** A persistent profile lives in the browser's *default* context, which is exactly what a CDP-attached client sees — so logging in once persists across runs with no save step. (Playwright's `storage_state` JSON is deliberately *not* supported: it loads into a separate non-default context that a CDP-attached client can't save back, so it can't be generated from within a session — a persistent profile does the job without that footgun.)
 - We pre-grant `microphone` permission via `--use-fake-ui-for-media-stream`. No permission prompt to dismiss.
 
 ## License
