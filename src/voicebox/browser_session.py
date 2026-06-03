@@ -36,9 +36,16 @@ def start_browser(
     cdp_port: int = 9222,
     headless: bool = False,
     user_data_dir: Optional[str] = None,
+    storage_state: Optional[str] = None,
     startup_timeout: float = 60.0,
 ) -> dict:
     """Launch Chromium with the shim pre-injected. Blocks until the page is loaded.
+
+    ``user_data_dir`` reuses a full persistent Chrome profile; ``storage_state``
+    seeds a fresh context from a Playwright storage-state JSON (cookies +
+    localStorage). Either reuses an authenticated session so callers don't have
+    to log in every run. If both are set, ``storage_state`` is ignored (a
+    persistent profile already carries its own cookies).
 
     Returns a dict with ``cdp_endpoint`` (HTTP URL for ``connect_over_cdp``)
     and ``audio_ws_url``.
@@ -51,17 +58,23 @@ def start_browser(
     _stop_event = multiprocessing.Event()
     _browser_process = multiprocessing.Process(
         target=_run_browser,
-        args=(url, audio_ws_url, cdp_port, headless, user_data_dir,
-              _ready_event, _stop_event),
+        args=(
+            url,
+            audio_ws_url,
+            cdp_port,
+            headless,
+            user_data_dir,
+            storage_state,
+            _ready_event,
+            _stop_event,
+        ),
     )
     _browser_process.start()
     logger.debug(f"Browser child process PID {_browser_process.ident}")
 
     if not _ready_event.wait(timeout=startup_timeout):
         stop_browser()
-        raise RuntimeError(
-            f"Browser failed to become ready within {startup_timeout}s"
-        )
+        raise RuntimeError(f"Browser failed to become ready within {startup_timeout}s")
 
     return {
         "cdp_endpoint": f"http://localhost:{cdp_port}",
@@ -99,6 +112,7 @@ def _run_browser(
     cdp_port: int,
     headless: bool,
     user_data_dir: Optional[str],
+    storage_state: Optional[str],
     ready_event,
     stop_event,
 ):
@@ -107,8 +121,14 @@ def _run_browser(
 
     asyncio.run(
         _run_browser_async(
-            url, audio_ws_url, cdp_port, headless, user_data_dir,
-            ready_event, stop_event,
+            url,
+            audio_ws_url,
+            cdp_port,
+            headless,
+            user_data_dir,
+            storage_state,
+            ready_event,
+            stop_event,
         )
     )
 
@@ -119,6 +139,7 @@ async def _run_browser_async(
     cdp_port: int,
     headless: bool,
     user_data_dir: Optional[str],
+    storage_state: Optional[str],
     ready_event,
     stop_event,
 ):
@@ -127,9 +148,7 @@ async def _run_browser_async(
     from playwright.async_api import async_playwright
 
     shim_src = SHIM_PATH.read_text(encoding="utf-8")
-    init_script = (
-        f"window.__VOICE_SHIM_WS_URL__ = {audio_ws_url!r};\n{shim_src}"
-    )
+    init_script = f"window.__VOICE_SHIM_WS_URL__ = {audio_ws_url!r};\n{shim_src}"
 
     chromium_args = [
         f"--remote-debugging-port={cdp_port}",
@@ -141,6 +160,11 @@ async def _run_browser_async(
 
     async with async_playwright() as p:
         if user_data_dir:
+            if storage_state:
+                logger.warning(
+                    "Both user_data_dir and storage_state set — ignoring "
+                    "storage_state; the persistent profile carries its own cookies."
+                )
             context = await p.chromium.launch_persistent_context(
                 user_data_dir=user_data_dir,
                 headless=headless,
@@ -153,7 +177,10 @@ async def _run_browser_async(
                 headless=headless,
                 args=chromium_args,
             )
-            context = await browser.new_context(permissions=["microphone"])
+            context = await browser.new_context(
+                permissions=["microphone"],
+                storage_state=storage_state,
+            )
 
         await context.add_init_script(init_script)
         page = await context.new_page()
@@ -163,9 +190,7 @@ async def _run_browser_async(
         except Exception as e:
             logger.error(f"page.goto failed: {e}")
 
-        logger.info(
-            f"Browser ready. CDP: http://localhost:{cdp_port} | audio: {audio_ws_url}"
-        )
+        logger.info(f"Browser ready. CDP: http://localhost:{cdp_port} | audio: {audio_ws_url}")
         ready_event.set()
 
         try:
