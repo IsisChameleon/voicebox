@@ -12,9 +12,10 @@ page's remote audio is teed back to it — over a raw-PCM WebSocket served
 by ``BrowserShimRunnerArguments``.
 
 Chromium is exposed on CDP port ``cdp_port`` so an external Playwright
-client (Claude's playwright-cli/playwright-mcp) can attach via
-``chromium.connect_over_cdp("http://localhost:<cdp_port>")`` and drive the
-UI (login, navigate, click buttons).
+client can attach via ``chromium.connect_over_cdp("http://localhost:<cdp_port>")``
+(or ``@playwright/mcp --cdp-endpoint=...``) and drive the UI (login, navigate,
+click buttons). Note: ``playwright-cli`` cannot attach — its ``--config
+browser.cdpEndpoint`` is ignored and it launches its own in-memory browser.
 """
 
 import multiprocessing
