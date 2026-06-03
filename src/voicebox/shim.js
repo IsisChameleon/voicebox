@@ -248,6 +248,29 @@
             diag.audioTrackCount++;
             console.log(TAG, 'tee-ing remote audio track', track.id);
 
+            // Chromium only decodes a REMOTE WebRTC audio track while it is being
+            // rendered by a media element; a MediaStreamAudioSourceNode alone is
+            // NOT enough — the tap below then captures pure silence. (Verified by
+            // loopback test: createMediaStreamSource on a remote track yields all
+            // zeros unless an <audio>/<video> element is also playing the stream;
+            // headless and muted state make no difference.) Previously capture
+            // only worked as a side-effect of the page rendering the bot's audio,
+            // so it broke on apps/states that don't. Sink the track into our own
+            // muted, un-attached <audio> element so the decode always runs.
+            let sinkEl = null;
+            try {
+              sinkEl = new Audio();
+              sinkEl.muted = true;
+              sinkEl.autoplay = true;
+              sinkEl.srcObject = new MediaStream([track]);
+              const playPromise = sinkEl.play();
+              if (playPromise && playPromise.catch) {
+                playPromise.catch((e) => recordError('sink element play', e));
+              }
+            } catch (e) {
+              recordError('sink element', e);
+            }
+
             let ctx;
             try {
               ctx = await ensureAudioCtx();
@@ -290,6 +313,7 @@
             track.addEventListener('ended', () => {
               try { source.disconnect(); } catch {}
               try { node.disconnect(); } catch {}
+              if (sinkEl) { try { sinkEl.srcObject = null; } catch {} }
             });
           });
         }
