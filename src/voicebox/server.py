@@ -79,7 +79,6 @@ async def start_browser_session(
     cdp_port: int = 9222,
     audio_port: int = 9091,
     user_data_dir: str | None = None,
-    storage_state: str | None = None,
 ) -> dict:
     """Launch a Playwright-controlled Chromium with the browser audio shim injected.
 
@@ -93,14 +92,9 @@ async def start_browser_session(
     ``chromium.connect_over_cdp``) should attach to in order to drive the UI
     (login, navigate, click "Start reading", etc).
 
-    To skip logging in every run, prefer ``user_data_dir`` (a persistent Chrome
+    To skip logging in every run, pass ``user_data_dir`` (a persistent Chrome
     profile): log in once and the profile keeps you authenticated on every later
-    run with the same dir — no save step. ``storage_state`` (a Playwright
-    cookies+localStorage JSON) also restores auth, but the file must be produced
-    out-of-band by a standalone Playwright login script
-    (``await context.storage_state(path=...)``); a client attached over CDP
-    cannot save it, because Playwright's CDP view targets the browser's default
-    context while the shim page runs in a separate one.
+    run with the same dir — no save step.
 
     Args:
         url: Initial URL to open (e.g. the app's home page).
@@ -109,9 +103,7 @@ async def start_browser_session(
         cdp_port: Chromium remote-debugging port.
         audio_port: Local port the WebSocket audio transport listens on.
         user_data_dir: Persistent Chrome profile dir to reuse an authenticated
-            session. Mutually exclusive with ``storage_state``.
-        storage_state: Path to a Playwright storage-state JSON to seed a fresh
-            context with saved cookies/localStorage.
+            session across runs.
 
     Returns:
         ``{cdp_endpoint, audio_ws_url}``.
@@ -129,7 +121,6 @@ async def start_browser_session(
             cdp_port=cdp_port,
             headless=headless,
             user_data_dir=user_data_dir,
-            storage_state=storage_state,
         )
     except Exception:
         stop_pipecat_process()

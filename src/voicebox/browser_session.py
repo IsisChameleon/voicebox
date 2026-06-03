@@ -36,16 +36,14 @@ def start_browser(
     cdp_port: int = 9222,
     headless: bool = False,
     user_data_dir: Optional[str] = None,
-    storage_state: Optional[str] = None,
     startup_timeout: float = 60.0,
 ) -> dict:
     """Launch Chromium with the shim pre-injected. Blocks until the page is loaded.
 
-    ``user_data_dir`` reuses a full persistent Chrome profile; ``storage_state``
-    seeds a fresh context from a Playwright storage-state JSON (cookies +
-    localStorage). Either reuses an authenticated session so callers don't have
-    to log in every run. If both are set, ``storage_state`` is ignored (a
-    persistent profile already carries its own cookies).
+    ``user_data_dir`` reuses a full persistent Chrome profile so callers don't
+    have to log in every run; the profile lives in the browser's default
+    context, which is CDP-coherent (an attached client both drives and shares
+    its cookies).
 
     Returns a dict with ``cdp_endpoint`` (HTTP URL for ``connect_over_cdp``)
     and ``audio_ws_url``.
@@ -64,7 +62,6 @@ def start_browser(
             cdp_port,
             headless,
             user_data_dir,
-            storage_state,
             _ready_event,
             _stop_event,
         ),
@@ -112,7 +109,6 @@ def _run_browser(
     cdp_port: int,
     headless: bool,
     user_data_dir: Optional[str],
-    storage_state: Optional[str],
     ready_event,
     stop_event,
 ):
@@ -126,7 +122,6 @@ def _run_browser(
             cdp_port,
             headless,
             user_data_dir,
-            storage_state,
             ready_event,
             stop_event,
         )
@@ -139,7 +134,6 @@ async def _run_browser_async(
     cdp_port: int,
     headless: bool,
     user_data_dir: Optional[str],
-    storage_state: Optional[str],
     ready_event,
     stop_event,
 ):
@@ -160,11 +154,6 @@ async def _run_browser_async(
 
     async with async_playwright() as p:
         if user_data_dir:
-            if storage_state:
-                logger.warning(
-                    "Both user_data_dir and storage_state set — ignoring "
-                    "storage_state; the persistent profile carries its own cookies."
-                )
             context = await p.chromium.launch_persistent_context(
                 user_data_dir=user_data_dir,
                 headless=headless,
@@ -177,10 +166,7 @@ async def _run_browser_async(
                 headless=headless,
                 args=chromium_args,
             )
-            context = await browser.new_context(
-                permissions=["microphone"],
-                storage_state=storage_state,
-            )
+            context = await browser.new_context(permissions=["microphone"])
 
         await context.add_init_script(init_script)
         page = await context.new_page()

@@ -45,7 +45,7 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
 | `src/voicebox/raw_pcm_serializer.py` | Tiny `FrameSerializer`: raw 16-bit LE mono PCM, no protobuf/envelope. |
 | `src/voicebox/processors/kokoro_tts.py` | Kokoro TTS service (`voice_id="af_heart"`). |
 | `src/voicebox/shim.js` | The browser shim, injected via `addInitScript` before page code. Overrides `getUserMedia` (Hook 1) and wraps `RTCPeerConnection` (Hook 2). Diagnostics on `window.__voiceShim`. |
-| `src/voicebox/browser_session.py` | Manages the Playwright child process. Supports `user_data_dir` (persistent default context, CDP-coherent) and `storage_state` (loaded into a separate context — auth works but invisible to / unsaveable by a CDP client; see trap below). Both exposed via `start_browser_session`. |
+| `src/voicebox/browser_session.py` | Manages the Playwright child process. Supports `user_data_dir` (persistent default context, CDP-coherent — exposed via `start_browser_session` for session reuse). See the CDP context-split trap below for why `storage_state` is intentionally not offered. |
 | `scripts/smoke_browser_shim.py` | Audio-path smoke test (no readme app needed). The reference for `connect_over_cdp` + reading `__voiceShim`. |
 | `scripts/e2e_readme_call.py` | Full e2e driver: login → navigate → call → speak/listen → end, against the readme app. Canonical CDP-driving example. Runs `headless=True` and dumps WAVs. |
 
@@ -88,12 +88,14 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
   exists with diagnostics (`installed`, `wsReady`, `inboundChunks`, `outboundChunks`, `errors`, …).
 - **Known limitation:** the `RTCPeerConnection` wrap can't reach peer connections inside cross-origin
   iframes or Web Workers (e.g. Daily Prebuilt `<DailyIframe>`).
-- **CDP context split (verified):** `chromium.launch()` + `new_context()` puts the shim page in a
-  non-default browser context. A client attached via `connect_over_cdp` *sees the page* under
-  `contexts[0]` but cookie ops (`context.cookies()`, `context.storage_state()`) hit the **default**
-  context and come back empty. So `storage_state` LOAD works (the page sends the cookie — confirmed
-  by echo test) but SAVE-via-CDP does not. `launch_persistent_context` (`user_data_dir`) uses the
-  default context, so it's fully CDP-coherent — prefer it for session reuse.
+- **CDP context split (verified — why only `user_data_dir` is offered):** `chromium.launch()` +
+  `new_context()` puts the shim page in a non-default browser context. A client attached via
+  `connect_over_cdp` *sees the page* under `contexts[0]` but cookie ops (`context.cookies()`,
+  `context.storage_state()`) hit the **default** context and come back empty. So a Playwright
+  `storage_state` would LOAD (the page sends the cookie — confirmed by echo test) but could not be
+  SAVED via CDP — you couldn't generate it from within a session. `launch_persistent_context`
+  (`user_data_dir`) uses the default context, so it's fully CDP-coherent; it's the only session-reuse
+  knob exposed.
 
 ## Dev workflow
 

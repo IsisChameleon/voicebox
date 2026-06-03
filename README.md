@@ -60,7 +60,7 @@ Cursor (`~/.cursor/mcp.json`):
 
 | Tool | Purpose |
 |---|---|
-| `start_browser_session(url, headless?, cdp_port?, audio_port?, user_data_dir?, storage_state?)` | Launch a Playwright Chromium with the audio shim injected, navigate to `url`, expose CDP. The shim hijacks the page's mic (fed by Kokoro) and tees the page's WebRTC remote audio into Whisper. Returns `{cdp_endpoint, audio_ws_url}`. Drive the UI with any Playwright client that can attach over CDP (see below). To reuse an authenticated session, pass `user_data_dir` (persistent profile — log in once, stays logged in; recommended) or `storage_state` (a cookies/localStorage JSON produced out-of-band). |
+| `start_browser_session(url, headless?, cdp_port?, audio_port?, user_data_dir?)` | Launch a Playwright Chromium with the audio shim injected, navigate to `url`, expose CDP. The shim hijacks the page's mic (fed by Kokoro) and tees the page's WebRTC remote audio into Whisper. Returns `{cdp_endpoint, audio_ws_url}`. Drive the UI with any Playwright client that can attach over CDP (see below). Pass `user_data_dir` (a persistent Chrome profile) to reuse an authenticated session: log in once and stay logged in on later runs with the same dir. |
 | `speak(text)` | Synthesize `text` with Kokoro TTS and stream it into the shim's synthetic mic. Returns when frames are queued — not when audio has finished playing. |
 | `listen(timeout=30)` | Block until the other side completes an utterance (VAD-segmented). Returns the transcribed text, or `""` on timeout. A long reply produces multiple utterances; call `listen()` in a loop. |
 | `stop()` | Tear down the pipecat agent and close the Chromium session. |
@@ -80,7 +80,7 @@ Cursor (`~/.cursor/mcp.json`):
 //      @playwright/mcp:   npx @playwright/mcp@latest --cdp-endpoint=http://localhost:9222
 //                         (it attaches to our browser instead of launching its own;
 //                          leave its --user-data-dir unset — incompatible with --cdp-endpoint.
-//                          Persist auth via this server's user_data_dir/storage_state instead.)
+//                          Persist auth via this server's user_data_dir instead.)
 //      your own script:   browser = await playwright.chromium.connect_over_cdp("http://localhost:9222")
 //                         (see scripts/e2e_readme_call.py for a full login→navigate→call driver)
 
@@ -167,7 +167,7 @@ login → navigate → call → conversation → end against the readme app.
 - **Headless Chromium works, audio path included** — `headless=true` still captures the bot's audio and feeds the synthetic mic (the tap is Web Audio, not a visible window). The shim relies on Web Audio + `MediaStreamTrackGenerator` (modern Chromium-only). Tested with Playwright 1.50 + bundled Chromium.
 - **`RTCPeerConnection` wrap won't catch peer connections inside cross-origin iframes or Web Workers.** Not an issue for the readme app, but a real limitation for apps using Daily Prebuilt's `<DailyIframe>` (workaround: hook `<audio>` elements via `MutationObserver` + `captureStream()`).
 - **One session at a time.** The server pins ports 9090 (MCP), 9091 (audio WS), 9222 (CDP). `start_browser_session` checks `audio_port`/`cdp_port` are free first and fails with a clear message if not — pass overrides to run a second session in parallel.
-- **Session reuse: prefer `user_data_dir` over `storage_state`.** A persistent profile lives in the browser's *default* context, which is exactly what a CDP-attached client sees — so logging in once persists across runs with no save step. `storage_state` is loaded into a separate (non-default) context: the shim page does use those cookies (auth is restored), but a CDP-attached client can neither list them via `context.cookies()` nor save them via `context.storage_state()` — Playwright's CDP view targets the default context. So a `storage_state` file must be produced out-of-band by a standalone (non-CDP) Playwright login script.
+- **Session reuse uses `user_data_dir`.** A persistent profile lives in the browser's *default* context, which is exactly what a CDP-attached client sees — so logging in once persists across runs with no save step. (Playwright's `storage_state` JSON is deliberately *not* supported: it loads into a separate non-default context that a CDP-attached client can't save back, so it can't be generated from within a session — a persistent profile does the job without that footgun.)
 - We pre-grant `microphone` permission via `--use-fake-ui-for-media-stream`. No permission prompt to dismiss.
 
 ## License
