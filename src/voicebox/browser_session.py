@@ -74,10 +74,12 @@ def start_browser(
         stop_browser()
         raise RuntimeError(f"Browser failed to become ready within {startup_timeout}s")
 
+    cdp_endpoint = f"http://localhost:{cdp_port}"
     return {
-        "cdp_endpoint": f"http://localhost:{cdp_port}",
+        "cdp_endpoint": cdp_endpoint,
         "audio_ws_url": audio_ws_url,
-        "playwright_mcp_env": f"PLAYWRIGHT_MCP_CDP_ENDPOINT=http://localhost:{cdp_port}",
+        "playwright_mcp_env": f"PLAYWRIGHT_MCP_CDP_ENDPOINT={cdp_endpoint} PLAYWRIGHT_MCP_ISOLATED=false",
+        "attach_hint": f"playwright-cli close-all && PLAYWRIGHT_MCP_CDP_ENDPOINT={cdp_endpoint} PLAYWRIGHT_MCP_ISOLATED=false playwright-cli",
     }
 
 

@@ -87,12 +87,23 @@ async def start_browser_session(
     MCP-driven Claude can play the role of the user in any browser-based
     voice app — without the app being aware of the indirection.
 
-    The returned ``cdp_endpoint`` is the URL an external Playwright client
-    should attach to. The returned ``playwright_mcp_env`` is the exact env var
-    to export before opening a ``@playwright/mcp`` session — start the session
-    fresh (no existing daemon for that session name) so the env var takes effect.
-    Do not open new tabs once attached; the audio shim lives only in the original
-    tab and a second tab connecting to the audio server causes a reconnect storm.
+    The returned ``attach_hint`` is the exact shell command to paste to wire
+    up ``playwright-cli``. Two env vars are required together — omitting either
+    silently breaks attach:
+
+    - ``PLAYWRIGHT_MCP_CDP_ENDPOINT`` — points the client at voicebox's
+      Chromium instead of launching its own.
+    - ``PLAYWRIGHT_MCP_ISOLATED=false`` — without this, playwright-cli defaults
+      ``isolated=true`` and calls ``browser.newContext()`` even over CDP,
+      giving a fresh unauthenticated context instead of the existing voicebox
+      tab. Verified in playwright-core ``index.js`` and ``config.js``.
+
+    The ``close-all`` step in ``attach_hint`` is required when a daemon already
+    exists for the session name — reusing an existing daemon ignores env vars.
+
+    Do not open new tabs once attached; the audio shim lives only in the
+    original tab and a second tab connecting to the audio server causes a
+    reconnect storm.
 
     To skip logging in every run, pass ``user_data_dir`` (a persistent Chrome
     profile): log in once and the profile keeps you authenticated on every later
@@ -108,7 +119,7 @@ async def start_browser_session(
             session across runs.
 
     Returns:
-        ``{cdp_endpoint, audio_ws_url, playwright_mcp_env}``.
+        ``{cdp_endpoint, audio_ws_url, playwright_mcp_env, attach_hint}``.
 
     """
     _assert_port_free(audio_port, "audio_port")
