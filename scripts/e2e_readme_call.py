@@ -34,6 +34,7 @@ PASSWORD = "embertales456"
 
 
 async def login(page, email: str, password: str):
+    """Navigate to login if needed and submit credentials."""
     logger.info(f"page url: {page.url}")
     if "/auth/login" not in page.url:
         return
@@ -95,9 +96,11 @@ async def navigate_to_call(page):
 
 
 async def wait_for_connected(page, timeout: float = 60.0):
-    """Wait until ConnectButton reports "End reading" (= connectionState in
-    {connected, ready}). voice-ui-kit's ConnectButton renders its label as
-    aria-label with no innerText, so we check both."""
+    """Wait until ConnectButton reports "End reading" (= connectionState connected/ready).
+
+    voice-ui-kit's ConnectButton renders its label as aria-label with no
+    innerText, so we check both.
+    """
     logger.info("waiting for call to connect…")
     end = asyncio.get_event_loop().time() + timeout
     last = None
@@ -146,6 +149,7 @@ async def click_red_cross(page):
 
 
 async def main():
+    """Run the full e2e call against a localhost:3000 readme app."""
     from voicebox.agent_ipc import (
         send_command,
         start_pipecat_process,

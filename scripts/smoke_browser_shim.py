@@ -27,6 +27,7 @@ logger.add(sys.stderr, level="INFO")
 
 
 async def main():
+    """Run the audio-path smoke test (no readme app needed)."""
     from voicebox.agent_ipc import (
         send_command,
         start_pipecat_process,
