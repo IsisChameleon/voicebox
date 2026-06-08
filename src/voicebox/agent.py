@@ -158,10 +158,12 @@ class PipecatMCPAgent:
         self._task = asyncio.create_task(self._pipeline_runner.run(self._pipeline_task))
 
         if self._audio_buffer is not None:
+
             async def _start_recording():
                 await self._connected.wait()
                 await self._audio_buffer.start_recording()
                 logger.info("Audio recording started")
+
             asyncio.create_task(_start_recording())
 
         self._started = True

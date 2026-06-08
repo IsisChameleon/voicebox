@@ -75,7 +75,9 @@ async def main(headless: bool):
         # Try data: URL with a real document.
         consoles.clear()
         page_errors.clear()
-        await page.goto("data:text/html,<!doctype html><title>shim test</title><script>console.log('inline OK')</script>")
+        await page.goto(
+            "data:text/html,<!doctype html><title>shim test</title><script>console.log('inline OK')</script>"
+        )
         await asyncio.sleep(1.0)
         diag2 = await page.evaluate(
             """
