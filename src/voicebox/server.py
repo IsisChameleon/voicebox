@@ -88,9 +88,11 @@ async def start_browser_session(
     voice app — without the app being aware of the indirection.
 
     The returned ``cdp_endpoint`` is the URL an external Playwright client
-    (e.g. ``@playwright/mcp`` launched with ``--cdp-endpoint``, or your own
-    ``chromium.connect_over_cdp``) should attach to in order to drive the UI
-    (login, navigate, click "Start reading", etc).
+    should attach to. The returned ``playwright_mcp_env`` is the exact env var
+    to export before opening a ``@playwright/mcp`` session — start the session
+    fresh (no existing daemon for that session name) so the env var takes effect.
+    Do not open new tabs once attached; the audio shim lives only in the original
+    tab and a second tab connecting to the audio server causes a reconnect storm.
 
     To skip logging in every run, pass ``user_data_dir`` (a persistent Chrome
     profile): log in once and the profile keeps you authenticated on every later
@@ -106,7 +108,7 @@ async def start_browser_session(
             session across runs.
 
     Returns:
-        ``{cdp_endpoint, audio_ws_url}``.
+        ``{cdp_endpoint, audio_ws_url, playwright_mcp_env}``.
 
     """
     _assert_port_free(audio_port, "audio_port")

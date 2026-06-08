@@ -13,9 +13,9 @@ by ``BrowserShimRunnerArguments``.
 
 Chromium is exposed on CDP port ``cdp_port`` so an external Playwright
 client can attach via ``chromium.connect_over_cdp("http://localhost:<cdp_port>")``
-(or ``@playwright/mcp --cdp-endpoint=...``) and drive the UI (login, navigate,
-click buttons). Note: ``playwright-cli`` cannot attach — its ``--config
-browser.cdpEndpoint`` is ignored and it launches its own in-memory browser.
+or via ``@playwright/mcp`` with ``PLAYWRIGHT_MCP_CDP_ENDPOINT=http://localhost:<cdp_port>``
+set before opening a session (env var wins over ``--config`` because the daemon
+must be started fresh — reusing an existing daemon ignores the config).
 """
 
 import multiprocessing
@@ -77,6 +77,7 @@ def start_browser(
     return {
         "cdp_endpoint": f"http://localhost:{cdp_port}",
         "audio_ws_url": audio_ws_url,
+        "playwright_mcp_env": f"PLAYWRIGHT_MCP_CDP_ENDPOINT=http://localhost:{cdp_port}",
     }
 
 
@@ -169,8 +170,11 @@ async def _run_browser_async(
             )
             context = await browser.new_context(permissions=["microphone"])
 
-        await context.add_init_script(init_script)
         page = await context.new_page()
+        # Inject shim into this page only, not every future tab. New tabs opened
+        # by an attached CDP client must not connect to the audio WS — if they
+        # did, pipecat would kick the active connection and start a 1 Hz storm.
+        await page.add_init_script(init_script)
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
