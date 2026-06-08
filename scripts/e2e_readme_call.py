@@ -34,6 +34,7 @@ PASSWORD = "embertales456"
 
 
 async def login(page, email: str, password: str):
+    """Navigate to login if needed and submit credentials."""
     logger.info(f"page url: {page.url}")
     if "/auth/login" not in page.url:
         return
@@ -66,15 +67,14 @@ async def navigate_to_call(page):
     # Wait for the household page to actually render — RSC streaming means
     # the page can be at the right URL while the body is still empty.
     import re
+
     cta_regex = re.compile(r"Continue reading|Pick a story|Pick another|No readers yet")
     cta_locator = page.get_by_text(cta_regex).first
     try:
         await cta_locator.wait_for(state="visible", timeout=15000)
     except Exception:
         body_text = await page.evaluate("() => document.body.innerText.slice(0, 500)")
-        raise RuntimeError(
-            f"household page did not render a CTA. body excerpt:\n{body_text!r}"
-        )
+        raise RuntimeError(f"household page did not render a CTA. body excerpt:\n{body_text!r}")
     text = (await cta_locator.inner_text()).strip()
     logger.info(f"household CTA found: {text!r}")
     if "No readers yet" in text:
@@ -96,9 +96,11 @@ async def navigate_to_call(page):
 
 
 async def wait_for_connected(page, timeout: float = 60.0):
-    """Wait until ConnectButton reports "End reading" (= connectionState in
-    {connected, ready}). voice-ui-kit's ConnectButton renders its label as
-    aria-label with no innerText, so we check both."""
+    """Wait until ConnectButton reports "End reading" (= connectionState connected/ready).
+
+    voice-ui-kit's ConnectButton renders its label as aria-label with no
+    innerText, so we check both.
+    """
     logger.info("waiting for call to connect…")
     end = asyncio.get_event_loop().time() + timeout
     last = None
@@ -147,6 +149,7 @@ async def click_red_cross(page):
 
 
 async def main():
+    """Run the full e2e call against a localhost:3000 readme app."""
     from voicebox.agent_ipc import (
         send_command,
         start_pipecat_process,
@@ -168,7 +171,8 @@ async def main():
     logger.info("=== starting pipecat (browser-shim mode) ===")
     start_pipecat_process(
         BrowserShimRunnerArguments(
-            host="localhost", port=audio_port,
+            host="localhost",
+            port=audio_port,
             record_dir=artifacts_dir,
         )
     )
@@ -185,108 +189,111 @@ async def main():
     logger.info(f"browser ready: {info}")
 
     from playwright.async_api import async_playwright
+
     try:
-      async with async_playwright() as p:
-        browser = await p.chromium.connect_over_cdp(info["cdp_endpoint"])
-        ctx = browser.contexts[0]
-        page = ctx.pages[0]
-        page.on("console", lambda m: logger.debug(f"console[{m.type}] {m.text}"))
-        page.on("pageerror", lambda e: logger.warning(f"pageerror {e}"))
+        async with async_playwright() as p:
+            browser = await p.chromium.connect_over_cdp(info["cdp_endpoint"])
+            ctx = browser.contexts[0]
+            page = ctx.pages[0]
+            page.on("console", lambda m: logger.debug(f"console[{m.type}] {m.text}"))
+            page.on("pageerror", lambda e: logger.warning(f"pageerror {e}"))
 
-        async def shot(name: str):
-            path = os.path.join(artifacts_dir, f"{name}.png")
+            async def shot(name: str):
+                path = os.path.join(artifacts_dir, f"{name}.png")
+                try:
+                    await page.screenshot(path=path, full_page=False)
+                    logger.info(f"📸 {path}")
+                except Exception as e:
+                    logger.warning(f"screenshot failed ({name}): {e}")
+
             try:
-                await page.screenshot(path=path, full_page=False)
-                logger.info(f"📸 {path}")
-            except Exception as e:
-                logger.warning(f"screenshot failed ({name}): {e}")
+                # Avoid networkidle — Next.js dev keeps a HMR WebSocket open and
+                # it never settles. domcontentloaded is enough here.
+                await page.wait_for_load_state("domcontentloaded", timeout=15000)
+                await shot("01_login_page")
+                await login(page, EMAIL, PASSWORD)
+                await page.wait_for_load_state("domcontentloaded", timeout=15000)
+                await shot("02_household_page")
+                await navigate_to_call(page)
+                await shot("03_call_page_loaded")
+                await wait_for_connected(page, timeout=90.0)
+                await shot("04_call_connected")
 
-        try:
-            # Avoid networkidle — Next.js dev keeps a HMR WebSocket open and
-            # it never settles. domcontentloaded is enough here.
-            await page.wait_for_load_state("domcontentloaded", timeout=15000)
-            await shot("01_login_page")
-            await login(page, EMAIL, PASSWORD)
-            await page.wait_for_load_state("domcontentloaded", timeout=15000)
-            await shot("02_household_page")
-            await navigate_to_call(page)
-            await shot("03_call_page_loaded")
-            await wait_for_connected(page, timeout=90.0)
-            await shot("04_call_connected")
+                async def dump_shim():
+                    state = await page.evaluate(
+                        "() => ({"
+                        "inbound: window.__voiceShim?.inboundChunks,"
+                        "outbound: window.__voiceShim?.outboundChunks,"
+                        "pcCount: window.__voiceShim?.pcCount,"
+                        "audioTrackCount: window.__voiceShim?.audioTrackCount,"
+                        "outboundSampleRate: window.__voiceShim?.outboundSampleRate,"
+                        "outboundNumChannels: window.__voiceShim?.outboundNumChannels,"
+                        "outboundFormat: window.__voiceShim?.outboundFormat,"
+                        "perTrackBytes: window.__voiceShim?.perTrackBytes,"
+                        "errors: (window.__voiceShim?.errors || []).slice(-5)"
+                        "})"
+                    )
+                    logger.info(f"shim counters: {state}")
 
-            async def dump_shim():
-                state = await page.evaluate(
-                    "() => ({"
-                    "inbound: window.__voiceShim?.inboundChunks,"
-                    "outbound: window.__voiceShim?.outboundChunks,"
-                    "pcCount: window.__voiceShim?.pcCount,"
-                    "audioTrackCount: window.__voiceShim?.audioTrackCount,"
-                    "outboundSampleRate: window.__voiceShim?.outboundSampleRate,"
-                    "outboundNumChannels: window.__voiceShim?.outboundNumChannels,"
-                    "outboundFormat: window.__voiceShim?.outboundFormat,"
-                    "perTrackBytes: window.__voiceShim?.perTrackBytes,"
-                    "errors: (window.__voiceShim?.errors || []).slice(-5)"
-                    "})"
+                await dump_shim()
+
+                # Ember likely greets first — listen briefly to catch any opening line.
+                logger.info("=== listen (initial greeting) ===")
+                r0 = await send_command("listen", timeout=20.0)
+                logger.info(f"ember (greeting): {r0.get('text', '')!r}")
+
+                await dump_shim()
+
+                # First turn: ask
+                logger.info("=== speak: ask ===")
+                await send_command(
+                    "speak", text="Hi Ember! Can you tell me about this book in one short sentence?"
                 )
-                logger.info(f"shim counters: {state}")
+                await asyncio.sleep(1)
 
-            await dump_shim()
+                logger.info("=== listen (turn 1) ===")
+                r1 = await send_command("listen", timeout=45.0)
+                logger.info(f"ember (turn 1): {r1.get('text', '')!r}")
+                await dump_shim()
 
-            # Ember likely greets first — listen briefly to catch any opening line.
-            logger.info("=== listen (initial greeting) ===")
-            r0 = await send_command("listen", timeout=20.0)
-            logger.info(f"ember (greeting): {r0.get('text','')!r}")
+                # Second turn
+                logger.info("=== speak: follow-up ===")
+                await send_command("speak", text="Who is the main character?")
+                await asyncio.sleep(1)
+                r2 = await send_command("listen", timeout=30.0)
+                logger.info(f"ember (turn 2): {r2.get('text', '')!r}")
+                await dump_shim()
 
-            await dump_shim()
+                # End call by clicking red cross (or End reading button as fallback).
+                await shot("05_before_end_call")
+                await click_red_cross(page)
+                await asyncio.sleep(3)
+                await shot("06_after_end_call")
+                logger.info(f"after end-call, page url: {page.url}")
 
-            # First turn: ask
-            logger.info("=== speak: ask ===")
-            await send_command("speak", text="Hi Ember! Can you tell me about this book in one short sentence?")
-            await asyncio.sleep(1)
-
-            logger.info("=== listen (turn 1) ===")
-            r1 = await send_command("listen", timeout=45.0)
-            logger.info(f"ember (turn 1): {r1.get('text','')!r}")
-            await dump_shim()
-
-            # Second turn
-            logger.info("=== speak: follow-up ===")
-            await send_command("speak", text="Who is the main character?")
-            await asyncio.sleep(1)
-            r2 = await send_command("listen", timeout=30.0)
-            logger.info(f"ember (turn 2): {r2.get('text','')!r}")
-            await dump_shim()
-
-            # End call by clicking red cross (or End reading button as fallback).
-            await shot("05_before_end_call")
-            await click_red_cross(page)
-            await asyncio.sleep(3)
-            await shot("06_after_end_call")
-            logger.info(f"after end-call, page url: {page.url}")
-
-        finally:
-            try:
-                await browser.close()
-            except Exception:
-                pass
+            finally:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
     finally:
-      logger.info("=== teardown ===")
-      # Send the "stop" command FIRST so agent.stop() runs and flushes the
-      # audio recordings to disk. stop_pipecat_process() just kills the
-      # child, which would lose the buffered WAVs.
-      try:
-          await asyncio.wait_for(send_command("stop"), timeout=20.0)
-      except Exception as e:
-          logger.warning(f"send stop command failed: {e}")
-      try:
-          await asyncio.to_thread(stop_browser)
-      except Exception as e:
-          logger.warning(f"stop_browser failed: {e}")
-      try:
-          stop_pipecat_process()
-      except Exception as e:
-          logger.warning(f"stop_pipecat_process failed: {e}")
-      logger.info("done.")
+        logger.info("=== teardown ===")
+        # Send the "stop" command FIRST so agent.stop() runs and flushes the
+        # audio recordings to disk. stop_pipecat_process() just kills the
+        # child, which would lose the buffered WAVs.
+        try:
+            await asyncio.wait_for(send_command("stop"), timeout=20.0)
+        except Exception as e:
+            logger.warning(f"send stop command failed: {e}")
+        try:
+            await asyncio.to_thread(stop_browser)
+        except Exception as e:
+            logger.warning(f"stop_browser failed: {e}")
+        try:
+            stop_pipecat_process()
+        except Exception as e:
+            logger.warning(f"stop_pipecat_process failed: {e}")
+        logger.info("done.")
 
 
 if __name__ == "__main__":

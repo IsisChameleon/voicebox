@@ -19,6 +19,7 @@ SHIM_PATH = Path(__file__).resolve().parent.parent / "src" / "voicebox" / "shim.
 
 
 async def main(headless: bool):
+    """Launch Chromium with the shim injected and run diagnostic checks."""
     shim_src = SHIM_PATH.read_text(encoding="utf-8")
     init_script = f"window.__VOICE_SHIM_WS_URL__ = 'ws://localhost:9091';\n{shim_src}"
 
@@ -75,7 +76,9 @@ async def main(headless: bool):
         # Try data: URL with a real document.
         consoles.clear()
         page_errors.clear()
-        await page.goto("data:text/html,<!doctype html><title>shim test</title><script>console.log('inline OK')</script>")
+        await page.goto(
+            "data:text/html,<!doctype html><title>shim test</title><script>console.log('inline OK')</script>"
+        )
         await asyncio.sleep(1.0)
         diag2 = await page.evaluate(
             """

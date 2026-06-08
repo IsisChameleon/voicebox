@@ -27,6 +27,7 @@ logger.add(sys.stderr, level="INFO")
 
 
 async def main():
+    """Run the audio-path smoke test (no readme app needed)."""
     from voicebox.agent_ipc import (
         send_command,
         start_pipecat_process,
@@ -40,9 +41,7 @@ async def main():
     audio_ws_url = f"ws://localhost:{audio_port}"
 
     logger.info("=== starting pipecat in browser-shim mode ===")
-    start_pipecat_process(
-        BrowserShimRunnerArguments(host="localhost", port=audio_port)
-    )
+    start_pipecat_process(BrowserShimRunnerArguments(host="localhost", port=audio_port))
 
     # Give pipecat a moment to bind the WS port.
     await asyncio.sleep(2)
@@ -67,6 +66,7 @@ async def main():
     await asyncio.sleep(3)
 
     from playwright.async_api import async_playwright
+
     async with async_playwright() as p:
         browser = await p.chromium.connect_over_cdp(info["cdp_endpoint"])
         ctx = browser.contexts[0]

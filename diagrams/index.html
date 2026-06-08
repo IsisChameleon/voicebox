@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>voicebox — signal lab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #07090a;
+    --bg2: #0b0f11;
+    --panel: rgba(18, 24, 26, 0.72);
+    --panel-solid: #11181a;
+    --line: rgba(120, 200, 180, 0.16);
+    --line-strong: rgba(120, 200, 180, 0.32);
+    --ink: #e9f2ec;
+    --dim: #6e8079;
+    --dimmer: #4a5a54;
+    --amber: #ffb454;   /* TTS / mic / outbound 48 kHz */
+    --cyan:  #3fe0d0;   /* tap / STT / inbound 16 kHz  */
+    --ctrl:  #8ea2ff;   /* MCP control plane (text only) */
+    --danger:#ff5d6c;   /* the silent-tee bug */
+    --fix:   #7bffb0;   /* the fix */
+    --grid:  rgba(255,255,255,0.025);
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); }
+
+  body {
+    font-family: "JetBrains Mono", monospace;
+    min-height: 100vh;
+    background:
+      radial-gradient(1200px 700px at 80% -10%, rgba(63,224,208,0.07), transparent 60%),
+      radial-gradient(1000px 600px at 5% 110%, rgba(255,180,84,0.06), transparent 55%),
+      linear-gradient(180deg, var(--bg), var(--bg2));
+    background-attachment: fixed;
+  }
+
+  /* faint engineering grid + scanlines */
+  body::before {
+    content: "";
+    position: fixed; inset: 0; pointer-events: none; z-index: 0;
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 32px 32px;
+    mask-image: radial-gradient(120% 100% at 50% 30%, #000 60%, transparent 100%);
+  }
+  body::after {
+    content: "";
+    position: fixed; inset: 0; pointer-events: none; z-index: 1; opacity: 0.5;
+    background: repeating-linear-gradient(0deg, rgba(0,0,0,0.16) 0 1px, transparent 1px 3px);
+    mix-blend-mode: multiply;
+  }
+
+  .wrap { position: relative; z-index: 2; max-width: 1320px; margin: 0 auto; padding: 38px 26px 80px; }
+
+  /* ---- header ---- */
+  header { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex-wrap: wrap; margin-bottom: 26px; }
+  .brand { display: flex; align-items: center; gap: 16px; }
+  .logo {
+    width: 54px; height: 54px; flex: none; border-radius: 12px;
+    border: 1px solid var(--line-strong);
+    background: linear-gradient(160deg, rgba(63,224,208,0.12), rgba(255,180,84,0.08));
+    display: grid; place-items: center; overflow: hidden;
+  }
+  .logo svg { width: 40px; height: 26px; }
+  h1 {
+    font-family: "Bricolage Grotesque", sans-serif; font-weight: 800;
+    font-size: clamp(28px, 4.4vw, 46px); line-height: 0.9; margin: 0; letter-spacing: -0.02em;
+  }
+  h1 .vb { color: var(--ink); }
+  h1 small { display: block; font-family: "JetBrains Mono"; font-weight: 400; font-size: 12px; letter-spacing: 0.34em; text-transform: uppercase; color: var(--cyan); margin-top: 10px; }
+  .lede { max-width: 430px; color: var(--dim); font-size: 12.5px; line-height: 1.7; }
+  .lede b { color: var(--ink); font-weight: 500; }
+
+  /* ---- tabs ---- */
+  nav.tabs { display: flex; gap: 8px; margin: 6px 0 22px; flex-wrap: wrap; }
+  .tab {
+    appearance: none; cursor: pointer; font-family: "JetBrains Mono"; font-size: 12px; font-weight: 500;
+    letter-spacing: 0.06em; color: var(--dim); background: var(--panel); border: 1px solid var(--line);
+    padding: 12px 18px; border-radius: 10px; transition: all 0.22s ease; display: flex; align-items: center; gap: 9px;
+  }
+  .tab .num { font-size: 10px; color: var(--dimmer); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
+  .tab:hover { color: var(--ink); border-color: var(--line-strong); }
+  .tab.active { color: var(--bg); background: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 28px rgba(63,224,208,0.35); }
+  .tab.active .num { color: var(--bg); border-color: rgba(0,0,0,0.3); }
+
+  .view { display: none; animation: fade 0.5s ease both; }
+  .view.active { display: block; }
+  @keyframes fade { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+  .view-head { margin-bottom: 16px; }
+  .view-head h2 { font-family: "Bricolage Grotesque"; font-weight: 600; font-size: clamp(20px, 2.6vw, 28px); margin: 0 0 6px; letter-spacing: -0.01em; }
+  .view-head p { margin: 0; color: var(--dim); font-size: 12.5px; line-height: 1.6; max-width: 720px; }
+
+  /* ---- the stage (scales via viewBox) ---- */
+  .stage-frame {
+    border: 1px solid var(--line); border-radius: 18px; overflow: hidden;
+    background:
+      radial-gradient(900px 500px at 30% 0%, rgba(255,255,255,0.018), transparent 70%),
+      var(--bg2);
+    box-shadow: inset 0 0 80px rgba(0,0,0,0.5), 0 30px 80px -40px rgba(0,0,0,0.9);
+  }
+  svg.stage { display: block; width: 100%; height: auto; }
+
+  /* nodes (inside foreignObject) */
+  .node {
+    width: 100%; height: 100%; box-sizing: border-box;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 13px;
+    padding: 11px 13px; backdrop-filter: blur(3px); overflow: hidden;
+    display: flex; flex-direction: column; gap: 7px;
+    opacity: 0; animation: pop 0.55s cubic-bezier(0.2,0.9,0.3,1) forwards;
+  }
+  @keyframes pop { from { opacity: 0; transform: translateY(10px) scale(0.98); } to { opacity: 1; transform: none; } }
+  .node.accent-cyan { border-color: rgba(63,224,208,0.4); box-shadow: 0 0 30px -8px rgba(63,224,208,0.4); }
+  .node.accent-amber { border-color: rgba(255,180,84,0.38); box-shadow: 0 0 30px -8px rgba(255,180,84,0.3); }
+  .node.accent-ctrl { border-color: rgba(142,162,255,0.4); box-shadow: 0 0 30px -8px rgba(142,162,255,0.4); }
+  .node.accent-page { border-color: rgba(255,255,255,0.16); }
+
+  .node .top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .node h3 { font-family: "Bricolage Grotesque"; font-weight: 700; font-size: 15px; margin: 0; letter-spacing: -0.01em; }
+  .node .tag { font-size: 8.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim); }
+  .node .port { font-size: 9px; color: var(--cyan); border: 1px solid var(--line-strong); border-radius: 5px; padding: 1px 6px; white-space: nowrap; }
+  .node .note { font-size: 9.5px; line-height: 1.5; color: var(--dim); }
+  .node .note b { color: var(--ink); font-weight: 500; }
+
+  .pills { display: flex; flex-wrap: wrap; gap: 5px; }
+  .pill { font-size: 9.5px; padding: 3px 8px; border-radius: 6px; border: 1px solid var(--line); background: rgba(255,255,255,0.02); color: var(--ink); white-space: nowrap; }
+  .pill.cyan { color: var(--cyan); border-color: rgba(63,224,208,0.4); }
+  .pill.amber { color: var(--amber); border-color: rgba(255,180,84,0.4); }
+  .pill.ctrl { color: var(--ctrl); border-color: rgba(142,162,255,0.4); }
+
+  .hook { border: 1px dashed var(--line-strong); border-radius: 9px; padding: 7px 9px; display: flex; flex-direction: column; gap: 3px; }
+  .hook .hk-t { font-size: 10px; font-weight: 700; font-family: "Bricolage Grotesque"; }
+  .hook .hk-d { font-size: 9px; line-height: 1.45; color: var(--dim); }
+  .hook.cyan .hk-t { color: var(--cyan); }
+  .hook.amber .hk-t { color: var(--amber); }
+
+  .fixbox { border: 1px solid var(--fix); border-radius: 9px; padding: 7px 9px; background: rgba(123,255,176,0.06); }
+  .fixbox .fx-t { font-size: 10px; font-weight: 700; color: var(--fix); font-family: "Bricolage Grotesque"; display: flex; align-items: center; gap: 6px; }
+  .fixbox .fx-d { font-size: 9px; line-height: 1.5; color: #bfe9cf; margin-top: 3px; }
+  .strike { color: var(--danger); }
+
+  .diag { font-size: 8.5px; color: var(--dimmer); border-top: 1px solid var(--line); padding-top: 6px; margin-top: auto; }
+  .diag code { color: var(--cyan); }
+
+  /* svg path labels */
+  .lbl { font-family: "JetBrains Mono"; font-size: 10.5px; fill: var(--dim); }
+  .lbl.ctrl { fill: var(--ctrl); }
+  .lbl.amber { fill: var(--amber); }
+  .lbl.cyan { fill: var(--cyan); }
+  .lbl-bg { fill: var(--bg2); opacity: 0.82; }
+
+  .edge { fill: none; stroke-linecap: round; }
+  .edge.ctrl { stroke: var(--ctrl); }
+  .edge.amber { stroke: var(--amber); }
+  .edge.cyan { stroke: var(--cyan); }
+  .draw { stroke-dasharray: var(--len, 600); stroke-dashoffset: var(--len, 600); animation: draw 1.1s ease forwards; }
+  @keyframes draw { to { stroke-dashoffset: 0; } }
+  /* dashed-for-meaning edges fade in instead — .draw would override their dash pattern */
+  .fade-in { opacity: 0; animation: fadein 0.9s ease 0.35s forwards; }
+  @keyframes fadein { to { opacity: var(--fade-to, 1); } }
+
+  /* ---- notes row below stage ---- */
+  .notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin-top: 22px; }
+  .card {
+    border: 1px solid var(--line); border-radius: 14px; padding: 15px 16px; background: var(--panel);
+    position: relative; overflow: hidden;
+  }
+  .card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--accent, var(--cyan)); }
+  .card.bug { --accent: var(--danger); }
+  .card.fix { --accent: var(--fix); }
+  .card.amber { --accent: var(--amber); }
+  .card.ctrl { --accent: var(--ctrl); }
+  .card h4 { font-family: "Bricolage Grotesque"; font-weight: 700; font-size: 13.5px; margin: 0 0 7px; letter-spacing: -0.01em; }
+  .card .k { font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--accent, var(--cyan)); display: block; margin-bottom: 5px; }
+  .card p { margin: 0; font-size: 11px; line-height: 1.65; color: var(--dim); }
+  .card p b { color: var(--ink); font-weight: 500; }
+  .card code { color: var(--cyan); font-size: 10px; }
+
+  /* ---- call sequence (orchestration) ---- */
+  .seq { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-top: 22px; counter-reset: step; }
+  .step { border: 1px solid var(--line); border-radius: 12px; padding: 13px 14px; background: var(--panel); position: relative; }
+  .step .n { font-family: "Bricolage Grotesque"; font-weight: 800; font-size: 22px; color: var(--cyan); line-height: 1; }
+  .step .who { font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); margin: 8px 0 4px; }
+  .step .act { font-size: 11px; line-height: 1.55; color: var(--ink); }
+  .step .act code { color: var(--amber); font-size: 10.5px; }
+
+  /* legend */
+  .legend { display: flex; flex-wrap: wrap; gap: 16px 22px; margin-top: 26px; padding-top: 18px; border-top: 1px solid var(--line); }
+  .leg { display: flex; align-items: center; gap: 8px; font-size: 10.5px; color: var(--dim); }
+  .leg .sw { width: 22px; height: 3px; border-radius: 2px; }
+  .leg .sw.dot { width: 9px; height: 9px; border-radius: 50%; }
+
+  footer { margin-top: 40px; color: var(--dimmer); font-size: 10.5px; line-height: 1.7; }
+  footer code { color: var(--dim); }
+
+  @media (max-width: 640px) {
+    .wrap { padding: 24px 14px 60px; }
+    .lede { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="brand">
+      <div class="logo">
+        <!-- waveform mark -->
+        <svg viewBox="0 0 80 40" fill="none">
+          <polyline points="2,20 10,20 16,8 24,32 32,4 40,36 48,12 56,28 64,20 78,20"
+            stroke="#3fe0d0" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <div>
+        <h1><span class="vb">voice</span>box<small>synthetic-user signal lab</small></h1>
+      </div>
+    </div>
+    <p class="lede">An <b>MCP server that gives an LLM a voice and ears inside a browser</b> — so Claude can play a synthetic <i>user</i> against any web voice app (Daily, LiveKit, raw <code>RTCPeerConnection</code>) without the app knowing. Local models, no API keys: <b>Kokoro</b> TTS in, <b>Whisper</b> STT out.</p>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-view="arch"><span class="num">01</span> Architecture — three processes</button>
+    <button class="tab" data-view="orch"><span class="num">02</span> Orchestration — Claude + 2 MCP clients</button>
+    <button class="tab" data-view="shim"><span class="num">03</span> Shim — hooks &amp; gaps</button>
+  </nav>
+
+  <!-- ============================================================= -->
+  <!-- VIEW 1 : ARCHITECTURE                                         -->
+  <!-- ============================================================= -->
+  <section class="view active" id="arch">
+    <div class="view-head">
+      <h2>Audio never crosses the MCP boundary</h2>
+      <p>MCP carries <span style="color:var(--ctrl)">text / control</span> only. The actual audio flows <b>out-of-band</b> over a raw-16-bit-PCM WebSocket between <code>shim.js</code> (inside the page) and the pipecat child. Three processes, spawned (not forked).</p>
+    </div>
+
+    <div class="stage-frame">
+      <svg class="stage" viewBox="0 0 1240 760" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="aCtrl" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8ea2ff"/></marker>
+          <marker id="aAmber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#ffb454"/></marker>
+          <marker id="aCyan" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#3fe0d0"/></marker>
+        </defs>
+
+        <!-- ===== connectors ===== -->
+        <!-- Claude -> parent -->
+        <path class="edge ctrl draw" style="--len:80" d="M 170,104 L 170,150" stroke-width="2" marker-end="url(#aCtrl)"/>
+        <!-- parent -> child1 (IPC) -->
+        <path class="edge ctrl fade-in" d="M 342,250 C 410,250 410,205 472,200" stroke-width="2" stroke-dasharray="2 7" marker-end="url(#aCtrl)"/>
+        <!-- parent -> child2 (IPC) -->
+        <path class="edge ctrl fade-in" d="M 342,400 C 410,400 410,575 472,580" stroke-width="2" stroke-dasharray="2 7" marker-end="url(#aCtrl)"/>
+        <!-- child2 -> page (CDP launch) -->
+        <path class="edge ctrl draw" style="--len:300" d="M 804,600 C 858,600 858,440 882,420" stroke-width="2" marker-end="url(#aCtrl)"/>
+        <!-- audio cable OUT (TTS, amber): child1 -> page -->
+        <path id="archOut" class="edge amber draw" style="--len:130" d="M 804,212 C 850,216 852,236 882,242" stroke-width="2.4" marker-end="url(#aAmber)"/>
+        <!-- audio cable IN (tap, cyan): page -> child1 -->
+        <path id="archIn" class="edge cyan draw" style="--len:130" d="M 882,330 C 852,326 850,306 804,300" stroke-width="2.4" marker-end="url(#aCyan)"/>
+
+        <!-- traveling signal pulses -->
+        <circle r="3.6" fill="#ffb454"><animateMotion dur="1.9s" repeatCount="indefinite" keyPoints="0;1" keyTimes="0;1" path="M 804,212 C 850,216 852,236 882,242"/><animate attributeName="opacity" values="0;1;1;0" dur="1.9s" repeatCount="indefinite"/></circle>
+        <circle r="3.6" fill="#3fe0d0"><animateMotion dur="2.1s" repeatCount="indefinite" path="M 882,330 C 852,326 850,306 804,300"/><animate attributeName="opacity" values="0;1;1;0" dur="2.1s" repeatCount="indefinite"/></circle>
+
+        <!-- labels -->
+        <g>
+          <rect class="lbl-bg" x="183" y="118" width="118" height="15" rx="3"/>
+          <text class="lbl ctrl" x="187" y="129">HTTP · JSON-RPC</text>
+        </g>
+        <g>
+          <rect class="lbl-bg" x="352" y="168" width="120" height="15" rx="3"/>
+          <text class="lbl ctrl" x="356" y="179">mp.Queue · spawn</text>
+        </g>
+        <g>
+          <rect class="lbl-bg" x="600" y="640" width="200" height="15" rx="3"/>
+          <text class="lbl ctrl" x="604" y="651">CDP :9222 · launch + inject shim.js</text>
+        </g>
+        <g>
+          <rect class="lbl-bg" x="788" y="170" width="148" height="15" rx="3"/>
+          <text class="lbl amber" x="792" y="181">▶ mic feed · 48 kHz</text>
+          <rect class="lbl-bg" x="788" y="354" width="150" height="15" rx="3"/>
+          <text class="lbl cyan" x="792" y="365">◀ bot tap · 16 kHz</text>
+          <rect class="lbl-bg" x="788" y="270" width="92" height="15" rx="3"/>
+          <text class="lbl" x="792" y="281" style="font-size:9px">WS :9091</text>
+          <text class="lbl" x="792" y="294" style="font-size:8.5px; fill:var(--dimmer)">raw PCM</text>
+        </g>
+
+        <!-- ===== nodes ===== -->
+        <!-- Claude -->
+        <foreignObject x="40" y="34" width="260" height="70">
+          <div xmlns="http://www.w3.org/1999/xhtml" class="node accent-ctrl" style="animation-delay:.05s">
+            <div class="top"><h3 style="color:var(--ctrl)">CLAUDE</h3><span class="tag">LLM agent</span></div>
+            <div class="note">The synthetic user. Calls 4 MCP tools — and nothing else.</div>
+          </div>
+        </foreignObject>
+
+        <!-- voicebox parent -->
+        <foreignObject x="40" y="150" width="302" height="330">
+          <div xmlns="http://www.w3.org/1999/xhtml" class="node" style="animation-delay:.15s">
+            <div class="top"><h3>voicebox MCP server</h3><span class="port">:9090</span></div>
+            <div class="tag">parent · server.py · FastMCP</div>
+            <div class="note" style="margin-top:2px">The 4 tools Claude calls:</div>
+            <div class="pills">
+              <span class="pill ctrl">start_browser_session</span>
+              <span class="pill amber">speak</span>
+              <span class="pill cyan">listen</span>
+              <span class="pill">stop</span>
+            </div>
+            <div class="hook" style="border-style:solid; border-color:var(--line)">
+              <div class="hk-d"><b style="color:var(--ink)">No audio code here.</b> Carries text/control only. Talks to its children over a <code style="color:var(--ctrl)">multiprocessing.Queue</code>.</div>
+            </div>
+            <div class="diag">agent_ipc.py · spawn, <span style="color:var(--danger)">not fork</span> — forking the async loop / fds breaks</div>
+          </div>
+        </foreignObject>
+
+        <!-- child1 pipecat -->
+        <foreignObject x="472" y="110" width="332" height="250">
+          <div xmlns="http://www.w3.org/1999/xhtml" class="node accent-cyan" style="animation-delay:.3s">
+            <div class="top"><h3>pipecat audio agent</h3><span class="port">WS :9091</span></div>
+            <div class="tag">child 1 · bot.py → agent.py</div>
+            <div class="pills">
+              <span class="pill amber">Kokoro TTS — 48 kHz out</span>
+              <span class="pill cyan">Whisper STT — 16 kHz in</span>
+            </div>
+            <div class="pills">
+              <span class="pill">VAD stop_secs = 1.0s</span>
+              <span class="pill">raw-PCM serializer</span>
+            </div>
+            <div class="note"><b>VAD = 1.0s</b>, not pipecat's 0.2s default — 0.2s chops remote WebRTC speech into single-word transcripts.</div>
+            <div class="diag">WebsocketServerTransport · 16-bit LE mono PCM, no protobuf envelope</div>
+          </div>
+        </foreignObject>
+
+        <!-- child2 chromium -->
+        <foreignObject x="472" y="540" width="332" height="130">
+          <div xmlns="http://www.w3.org/1999/xhtml" class="node accent-ctrl" style="animation-delay:.4s">
+            <div class="top"><h3>Playwright Chromium</h3><span class="port">CDP :9222</span></div>
+            <div class="tag">child 2 · browser_session.py</div>
+            <div class="note">Launches the page, injects <code style="color:var(--cyan)">shim.js</code> via <code style="color:var(--ctrl)">page.add_init_script</code> (page-scoped, before page code), then parks until <code>stop()</code>. New tabs opened by @playwright/mcp do <b>not</b> get the shim.</div>
+          </div>
+        </foreignObject>
+
+        <!-- browser page -->
+        <foreignObject x="882" y="110" width="320" height="560">
+          <div xmlns="http://www.w3.org/1999/xhtml" class="node accent-page" style="animation-delay:.55s">
+            <div class="top"><h3>Browser page</h3><span class="tag">page under test</span></div>
+            <div class="tag" style="color:var(--cyan)">shim.js — injected before page JS</div>
+
+            <div class="hook amber">
+              <div class="hk-t">Hook 1 · getUserMedia()</div>
+              <div class="hk-d">Overridden. Hands the page a <b style="color:var(--ink)">fake mic</b> driven by Kokoro frames (48 kHz, matches the page's AudioContext). The bot hears Claude.</div>
+            </div>
+
+            <div class="hook cyan">
+              <div class="hk-t">Hook 2 · RTCPeerConnection wrap</div>
+              <div class="hk-d">Tees the bot's <b style="color:var(--ink)">remote audio track</b> back to Whisper via Web Audio (16 kHz). Track events deduped by <code style="color:var(--cyan)">track.id</code> (Daily opens several PCs).</div>
+            </div>
+
+            <div class="fixbox">
+              <div class="fx-t">✓ the silent-tee fix</div>
+              <div class="fx-d">Chromium only <i>decodes</i> a remote track while a media element renders it. So the shim sinks the track into its own <b style="color:var(--fix)">muted <code style="color:var(--fix)">new Audio()</code></b> — forcing the decode regardless of what the app does. Without it: continuous zeros → Whisper hallucinates <span class="strike">"I just disconnected…"</span></div>
+            </div>
+
+            <div class="diag">diagnostics → <code>window.__voiceShim</code> · installed · wsReady · inbound/outboundChunks · errors</div>
+          </div>
+        </foreignObject>
+      </svg>
+    </div>
+
+    <div class="notes">
+      <div class="card bug">
+        <span class="k">the bug that started it</span>
+        <h4>The silent WebRTC tee</h4>
+        <p><code>listen()</code> returned the <b>same Whisper silence-hallucination every call</b> while the bot spoke for 6+s. A <code>MediaStreamAudioSourceNode</code> alone doesn't drive the depacketizer — the worklet ticked but forwarded all zeros.</p>
+      </div>
+      <div class="card fix">
+        <span class="k">proven empirically</span>
+        <h4>Render forces decode</h4>
+        <p>A loopback matrix (headless×muted) showed peak <b>0.0</b> with no sink, <b>1.0</b> with any rendering element. The e2e test only ever worked because the readme app <b>mounts its own <code>&lt;audio&gt;</code></b> — an accidental side-effect.</p>
+      </div>
+      <div class="card amber">
+        <span class="k">intentional asymmetry</span>
+        <h4>48 kHz out / 16 kHz in</h4>
+        <p><b>Browser→pipecat = 16 kHz</b> because <code>mlx_whisper</code> hard-assumes it (no sample_rate param); the shim resamples 48→16. <b>pipecat→browser = 48 kHz</b> to match the page's native AudioContext.</p>
+      </div>
+      <div class="card bug">
+        <span class="k">known limitation</span>
+        <h4>Cross-origin iframe blind spot</h4>
+        <p>The <code>RTCPeerConnection</code> wrap only reaches the <b>top-level frame</b>. Daily Prebuilt's <code>&lt;DailyIframe&gt;</code> lives in a <code>daily.co</code>-origin frame — the hook never gets there. Detect: <code>audioTrackCount === 0</code> after call join. Use Daily's headless SDK instead of Prebuilt to avoid this. See tab 03 for full gap analysis.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================= -->
+  <!-- VIEW 2 : ORCHESTRATION                                        -->
+  <!-- ============================================================= -->
+  <section class="view" id="orch">
+    <div class="view-head">
+      <h2>One browser, two MCP clients, one orchestrator</h2>
+      <p>voicebox owns the <b>audio</b> half and hands back a <code>cdp_endpoint</code>. Claude points a <b>second</b> MCP client (<code>@playwright/mcp --cdp-endpoint</code>) at that same Chromium to drive the UI. voicebox deliberately ships <b>no</b> navigate/click tools — that split is the whole design.</p>
+    </div>
+
+    <div class="stage-frame">
+      <svg class="stage" viewBox="0 0 1240 700" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="oCtrl" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8ea2ff"/></marker>
+          <marker id="oAmber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#ffb454"/></marker>
+        </defs>
+
+        <!-- Claude -> voicebox -->
+        <path class="edge ctrl draw" style="--len:360" d="M 540,150 C 420,185 300,205 250,258" stroke-width="2" marker-end="url(#oCtrl)"/>
+        <!-- Claude -> playwright -->
+        <path class="edge ctrl draw" style="--len:360" d="M 700,150 C 820,185 940,205 990,258" stroke-width="2" marker-end="url(#oCtrl)"/>
+        <!-- voicebox -> chromium (owns/launches) -->
+        <path class="edge ctrl draw" style="--len:320" d="M 240,512 C 270,580 400,610 468,620" stroke-width="2.2" marker-end="url(#oCtrl)"/>
+        <!-- playwright -> chromium (attach CDP) -->
+        <path class="edge ctrl fade-in" d="M 1000,512 C 970,580 840,610 772,620" stroke-width="2" stroke-dasharray="2 7" marker-end="url(#oCtrl)"/>
+        <!-- audio WS voicebox -> chromium -->
+        <path id="orchAudio" class="edge amber draw" style="--len:360" d="M 150,512 C 120,600 250,650 430,648" stroke-width="2.2" marker-end="url(#oAmber)"/>
+        <circle r="3.6" fill="#ffb454"><animateMotion dur="2.4s" repeatCount="indefinite" path="M 150,512 C 120,600 250,650 430,648"/><animate attributeName="opacity" values="0;1;1;0" dur="2.4s" repeatCount="indefinite"/></circle>
+
+        <!-- handoff: cdp endpoint flows to playwright -->
+        <path class="edge cyan fade-in" style="--fade-to:0.65" d="M 410,232 C 600,150 760,150 980,300" stroke-width="1.6" stroke-dasharray="5 5" marker-end="url(#oCtrl)"/>
+
+        <!-- labels -->
+        <g>
+          <rect class="lbl-bg" x="318" y="188" width="120" height="15" rx="3"/>
+          <text class="lbl ctrl" x="322" y="199">MCP · audio</text>
+          <rect class="lbl-bg" x="800" y="188" width="124" height="15" rx="3"/>
+          <text class="lbl ctrl" x="804" y="199">MCP · UI driving</text>
+
+          <rect class="lbl-bg" x="300" y="556" width="120" height="15" rx="3"/>
+          <text class="lbl ctrl" x="304" y="567">launches + owns</text>
+          <rect class="lbl-bg" x="812" y="556" width="160" height="15" rx="3"/>
+          <text class="lbl ctrl" x="816" y="567">attaches over CDP :9222</text>
+
+          <rect class="lbl-bg" x="92" y="588" width="150" height="15" rx="3"/>
+          <text class="lbl amber" x="96" y="599">audio WS :9091</text>
+
+          <rect class="lbl-bg" x="556" y="120" width="232" height="16" rx="3"/>
+          <text class="lbl cyan" x="560" y="132">hands cdp_endpoint :9222 to client #2</text>
+        </g>
+
+        <!-- ===== nodes ===== -->
+        <!-- Claude -->
+        <foreignObject x="448" y="34" width="344" height="112">
+          <div xmlns="http://www.w3.org/1999/xhtml" class="node accent-ctrl" style="animation-delay:.05s">
+            <div class="top"><h3 style="color:var(--ctrl)">CLAUDE — orchestrator</h3><span class="tag">the synthetic user</span></div>
+            <div class="note">Drives <b>two MCP servers at once</b>. Gets <code style="color:var(--cyan)">{cdp_endpoint, audio_ws_url}</code> from voicebox, then forwards the CDP endpoint to the Playwright client so both attach to the <b>same</b> browser.</div>
+          </div>
+        </foreignObject>
+
+        <!-- voicebox MCP -->
+        <foreignObject x="70" y="258" width="340" height="254">
+          <div xmlns="http://www.w3.org/1999/xhtml" class="node accent-cyan" style="animation-delay:.2s">
+            <div class="top"><h3>voicebox MCP</h3><span class="port">client #1</span></div>
+            <div class="tag">audio + browser lifecycle</div>
+            <div class="pills">
+              <span class="pill ctrl">start_browser_session</span>
+              <span class="pill amber">speak</span>
+              <span class="pill cyan">listen</span>
+              <span class="pill">stop</span>
+            </div>
+            <div class="fixbox" style="border-color:var(--danger); background:rgba(255,93,108,0.06)">
+              <div class="fx-t" style="color:var(--danger)">✗ no UI tools by design</div>
+              <div class="fx-d" style="color:#f0c4c8">Ships <b style="color:#fff">no</b> navigate / click / snapshot. That's <i>why</i> a second client must attach.</div>
+            </div>
+            <div class="diag">returns → <code>cdp_endpoint</code> · <code>audio_ws_url</code></div>
+          </div>
+        </foreignObject>
+
+        <!-- playwright MCP -->
+        <foreignObject x="830" y="258" width="340" height="254">
+          <div xmlns="http://www.w3.org/1999/xhtml" class="node accent-ctrl" style="animation-delay:.3s">
+            <div class="top"><h3>@playwright/mcp</h3><span class="port">client #2</span></div>
+            <div class="tag">UI driving · --cdp-endpoint=:9222</div>
+            <div class="pills">
+              <span class="pill">navigate</span>
+              <span class="pill">click</span>
+              <span class="pill">fill</span>
+              <span class="pill">snapshot</span>
+            </div>
+            <div class="note">Logs in, navigates, joins the call — on the browser voicebox already launched.</div>
+            <div class="fixbox" style="border-color:var(--line); background:rgba(255,255,255,0.02)">
+              <div class="fx-d" style="color:var(--dim)"><span class="strike">playwright-cli</span> ✗ deprecated, ignores cdp · &nbsp;<code style="color:var(--cyan)">connect_over_cdp</code> ✓ also works</div>
+            </div>
+          </div>
+        </foreignObject>
+
+        <!-- shared chromium -->
+        <foreignObject x="370" y="540" width="500" height="120">
+          <div xmlns="http://www.w3.org/1999/xhtml" class="node accent-page" style="animation-delay:.45s">
+            <div class="top"><h3>Chromium — one shared browser</h3><span class="port">CDP :9222</span></div>
+            <div class="tag" style="color:var(--cyan)">shim.js injected · the page under test</div>
+            <div class="pills">
+              <span class="pill cyan">voicebox owns it</span>
+              <span class="pill ctrl">@playwright/mcp drives the UI</span>
+              <span class="pill amber">audio ↔ pipecat · WS :9091</span>
+            </div>
+          </div>
+        </foreignObject>
+      </svg>
+    </div>
+
+    <div class="seq">
+      <div class="step"><div class="n">1</div><div class="who">Claude → voicebox</div><div class="act"><code>start_browser_session(url)</code> → launches Chromium + shim, returns <code>{cdp_endpoint, audio_ws_url}</code></div></div>
+      <div class="step"><div class="n">2</div><div class="who">Claude → @playwright/mcp</div><div class="act">attach to <code>:9222</code>, then <code>navigate</code> / login / <code>click</code> → join the call</div></div>
+      <div class="step"><div class="n">3</div><div class="who">Claude → voicebox</div><div class="act"><code>speak("…")</code> → Kokoro feeds the fake mic — the bot hears the user</div></div>
+      <div class="step"><div class="n">4</div><div class="who">Claude → voicebox</div><div class="act"><code>listen()</code> → VAD-segmented Whisper transcript of the bot's reply</div></div>
+      <div class="step"><div class="n">5</div><div class="who">Claude → voicebox</div><div class="act"><code>stop()</code> → tears down the pipecat child + the browser child</div></div>
+    </div>
+
+    <div class="notes">
+      <div class="card ctrl">
+        <span class="k">surprising fit</span>
+        <h4>CI is actually better</h4>
+        <p>A single CI runner means browser + clients all live on <b><code>localhost</code></b> — no client/browser context split, no cross-machine wiring. The headless synthetic-user loop runs clean.</p>
+      </div>
+      <div class="card bug">
+        <span class="k">the sharp edge</span>
+        <h4>CDP context split</h4>
+        <p>A <code>connect_over_cdp</code> client <i>sees</i> the page under <code>contexts[0]</code> but cookie ops hit the <b>default</b> context → come back empty. <code>storage_state</code> can load but can't be saved via CDP.</p>
+      </div>
+      <div class="card fix">
+        <span class="k">so instead</span>
+        <h4>Session reuse via user_data_dir</h4>
+        <p><code>launch_persistent_context</code> uses the default context, so it's fully CDP-coherent. That's why voicebox exposes <b><code>user_data_dir</code></b> and dropped <code>storage_state</code> entirely.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================= -->
+  <!-- VIEW 3 : SHIM HOOKS & GAPS                                   -->
+  <!-- ============================================================= -->
+  <section class="view" id="shim">
+    <div class="view-head">
+      <h2>Two hooks, two blind spots</h2>
+      <p><code>shim.js</code> is injected via <code>page.add_init_script</code> (page-scoped, not context-scoped) before any page code runs — it replaces global browser APIs in-place. Scoping to the voicebox tab prevents @playwright/mcp's extra tabs from connecting to the audio WS and triggering a reconnect storm. Hook 1 controls what the page <b>sends</b>; Hook 2 controls what we <b>hear</b>. Each hook has preconditions; if they fail, it skips silently.</p>
+    </div>
+
+    <!-- hook detail cards -->
+    <div class="notes" style="grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; margin-bottom: 22px;">
+
+      <div class="card amber" style="padding: 18px 18px 14px;">
+        <span class="k">Hook 1 · outbound — what the page sends</span>
+        <h4 style="margin-bottom:10px">getUserMedia() override</h4>
+        <p style="margin-bottom:8px">When the page calls <code>navigator.mediaDevices.getUserMedia({audio: true})</code> the shim intercepts and returns a <b>synthetic <code>MediaStream</code></b> backed by a <code>MediaStreamTrackGenerator</code>. That generator is fed by inbound Kokoro PCM frames arriving over WS :9091. The app's <code>RTCPeerConnection</code> then sends <i>our voice</i> to the remote peer — without the app knowing.</p>
+        <p style="margin-bottom:8px">For video+audio calls: real video tracks are preserved; only the audio track is swapped.</p>
+        <div class="hook amber" style="margin-top:8px">
+          <div class="hk-t">Preconditions (either failing → hook skipped silently)</div>
+          <div class="hk-d">
+            · <code>navigator.mediaDevices</code> exists (unavailable on non-localhost HTTP, <code>about:blank</code>)<br/>
+            · <code>MediaStreamTrackGenerator</code> + <code>AudioData</code> exist (WebCodecs — present in Chrome ≥ 94)<br/>
+            · The page actually calls <code>getUserMedia({audio})</code> — apps that skip mic access entirely are unaffected (Hook 2 still covers them)
+          </div>
+        </div>
+        <div class="diag" style="margin-top:10px">Diagnostic: <code>window.__voiceShim.micHookInstalled</code> · <code>inboundChunks</code></div>
+      </div>
+
+      <div class="card" style="padding: 18px 18px 14px; --accent: var(--cyan);">
+        <span class="k">Hook 2 · inbound — what we hear</span>
+        <h4 style="margin-bottom:10px">RTCPeerConnection wrap</h4>
+        <p style="margin-bottom:8px">The shim saves <code>OrigRTCPeerConnection = window.RTCPeerConnection</code>, then defines <code>class WrappedRTCPeerConnection extends OrigRTCPeerConnection</code> and replaces the global. The subclass approach means all native WebRTC behavior is unchanged — only a <code>track</code> listener is added in the constructor.</p>
+        <p style="margin-bottom:8px">On each new inbound <b>audio</b> track: a muted hidden <code>&lt;audio&gt;</code> element forces Chromium to decode the track (without it, <code>createMediaStreamSource</code> returns silence — see the silent-tee fix). The decoded stream is routed through a <b>Web Audio graph at 16 kHz</b> → <code>AudioWorkletNode</code> → Float32-to-Int16 → raw PCM → WS :9091 → pipecat/Whisper.</p>
+        <p style="margin-bottom:8px">Track events are <b>deduped by <code>track.id</code></b> — Daily opens several peer connections for the same logical bot audio; without dedup, the same voice arrives 2–3× and Whisper gets an overlapping stream.</p>
+        <div class="hook cyan" style="margin-top:8px">
+          <div class="hk-t">Preconditions (either failing → hook skipped silently)</div>
+          <div class="hk-d">
+            · <code>window.RTCPeerConnection</code> exists (missing on very old browsers or non-WebRTC pages)<br/>
+            · <code>AudioContext</code> + <code>AudioWorkletNode</code> exist (Web Audio — available everywhere Chromium ships)<br/>
+            · The app constructs its <code>RTCPeerConnection</code> on the <b>main thread of the top frame</b> — see blind spots below
+          </div>
+        </div>
+        <div class="diag" style="margin-top:10px">Diagnostic: <code>window.__voiceShim.pcHookInstalled</code> · <code>pcCount</code> · <code>audioTrackCount</code> · <code>outboundChunks</code></div>
+      </div>
+    </div>
+
+    <!-- limitations matrix -->
+    <div class="view-head" style="margin-top:10px; margin-bottom:14px;">
+      <h2>Coverage gaps</h2>
+      <p>Hook 2 only intercepts peer connections constructed on the <b>main thread of the top-level frame</b>. Three isolation boundaries can put the RTC code out of reach.</p>
+    </div>
+
+    <div class="notes" style="grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px;">
+
+      <div class="card bug" style="padding: 18px 18px 14px;">
+        <span class="k">real gap · likely to hit</span>
+        <h4>Cross-origin iframes</h4>
+        <p style="margin-bottom:8px"><code>page.add_init_script</code> runs only in the top-level browsing context of the voicebox-owned tab. A cross-origin frame — e.g. <b>Daily Prebuilt's <code>&lt;DailyIframe&gt;</code></b> embedded from <code>daily.co</code> — has a separate JS context. The <code>window.RTCPeerConnection</code> replacement never reaches it; the peer connection is constructed in the frame's global, which is untouched.</p>
+        <p style="margin-bottom:8px">Detection: after the call joins, <code>window.__voiceShim.audioTrackCount === 0</code>. If the page uses Daily Prebuilt, Hook 2 will be silent.</p>
+        <p><b>Workaround options:</b> use the Daily SDK (headless API, not Prebuilt) which constructs PCs on the main page, or use Daily's <code>startRecording</code> / <code>getNetworkTopology</code> APIs for a server-side tap instead.</p>
+      </div>
+
+      <div class="card" style="padding: 18px 18px 14px; --accent: var(--dim);">
+        <span class="k">theoretical gap · dormant in practice</span>
+        <h4>Web Workers</h4>
+        <p style="margin-bottom:8px">Chromium added <code>RTCPeerConnection</code> to the <code>DedicatedWorker</code> scope around v100 (~2022). If an SDK constructed its peer connection inside a Worker, the hook on <code>window.RTCPeerConnection</code> would not propagate there.</p>
+        <p style="margin-bottom:8px"><b>In practice: no mainstream voice SDK does this.</b> Daily, LiveKit, Twilio, and Agora all construct their peer connections on the main thread. This gap is architecturally real but currently harmless for all target apps.</p>
+        <p>Detection would be the same: <code>audioTrackCount === 0</code> with no cross-origin iframe present.</p>
+      </div>
+
+      <div class="card fix" style="padding: 18px 18px 14px;">
+        <span class="k">resolved — was a real trap</span>
+        <h4>Extra-tab reconnect storm</h4>
+        <p style="margin-bottom:8px">When the shim was injected at <b>context level</b> (<code>context.add_init_script</code>), every new tab that @playwright/mcp opened also got the shim. That tab's shim connected to WS :9091 and pipecat kicked the existing connection ("only one client allowed"). The original tab reconnected after 1 s and kicked the new one. Both sides retried endlessly at ~1 Hz.</p>
+        <p>Fixed by switching to <b>page-scoped injection</b> (<code>page.add_init_script</code>). The shim lives only in the voicebox tab; new tabs opened by @playwright/mcp are plain browser tabs with no audio connection.</p>
+      </div>
+
+      <div class="card" style="padding: 18px 18px 14px; --accent: var(--dimmer);">
+        <span class="k">not a real gap</span>
+        <h4>Service Workers</h4>
+        <p style="margin-bottom:8px">Service Workers are network proxies — they have no access to <code>RTCPeerConnection</code>, <code>getUserMedia</code>, or <code>AudioContext</code>. No voice app routes WebRTC through a Service Worker; the APIs simply don't exist there.</p>
+        <p>Mentioned for completeness: this limitation does not apply to any audio use case and can be ignored.</p>
+      </div>
+
+    </div>
+
+    <!-- what to check when listen() is silent -->
+    <div class="view-head" style="margin-top:28px; margin-bottom:14px;">
+      <h2>Debugging a silent listen()</h2>
+    </div>
+    <div class="seq" style="margin-top:0;">
+      <div class="step"><div class="n">1</div><div class="who">check hooks installed</div><div class="act"><code>window.__voiceShim.micHookInstalled</code> + <code>pcHookInstalled</code> — both should be <code>true</code> on a cooperating page</div></div>
+      <div class="step"><div class="n">2</div><div class="who">check WS connection</div><div class="act"><code>window.__voiceShim.wsReady</code> — <code>false</code> means pipecat child isn't up or the WS :9091 port is wrong</div></div>
+      <div class="step"><div class="n">3</div><div class="who">check tracks tapped</div><div class="act"><code>audioTrackCount &gt; 0</code> and <code>outboundChunks</code> growing — if zero, Hook 2 never fired (cross-origin iframe?)</div></div>
+      <div class="step"><div class="n">4</div><div class="who">check inbound mic</div><div class="act"><code>inboundChunks</code> growing after <code>speak()</code> — confirms Kokoro frames are reaching the fake mic</div></div>
+      <div class="step"><div class="n">5</div><div class="who">check errors</div><div class="act"><code>window.__voiceShim.errors</code> — array of all suppressed hook errors; empty is good</div></div>
+    </div>
+  </section>
+
+  <div class="legend">
+    <div class="leg"><span class="sw" style="background:var(--ctrl)"></span> MCP / control plane — text only</div>
+    <div class="leg"><span class="sw" style="background:var(--amber)"></span> TTS · mic feed — Kokoro 48 kHz out</div>
+    <div class="leg"><span class="sw" style="background:var(--cyan)"></span> STT · bot tap — Whisper 16 kHz in</div>
+    <div class="leg"><span class="sw dot" style="background:var(--amber)"></span><span class="sw dot" style="background:var(--cyan)"></span> live signal (audio over WS :9091)</div>
+    <div class="leg"><span class="sw" style="background:var(--fix)"></span> the silent-tee fix</div>
+  </div>
+
+  <footer>
+    voicebox · ports MCP <code>:9090</code> · audio <code>:9091</code> · CDP <code>:9222</code><br/>
+    Every annotation here was verified empirically, not derived — see <code>CLAUDE.md</code> and <code>shim.js</code>.
+  </footer>
+
+</div>
+
+<script>
+  const tabs = document.querySelectorAll('.tab');
+  const views = document.querySelectorAll('.view');
+  tabs.forEach(tab => tab.addEventListener('click', () => {
+    const id = tab.dataset.view;
+    tabs.forEach(t => t.classList.toggle('active', t === tab));
+    views.forEach(v => v.classList.toggle('active', v.id === id));
+    // re-trigger node + edge animations on switch
+    document.querySelectorAll('#' + id + ' .node, #' + id + ' .draw, #' + id + ' .fade-in').forEach(el => {
+      el.style.animation = 'none'; void el.offsetWidth; el.style.animation = '';
+    });
+  }));
+</script>
+</body>
+</html>

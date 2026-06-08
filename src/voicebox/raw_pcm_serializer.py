@@ -20,17 +20,22 @@ from pipecat.serializers.base_serializer import FrameSerializer
 
 
 class RawPCMSerializer(FrameSerializer):
+    """Raw 16-bit LE mono PCM serializer for the browser-shim WebSocket transport."""
+
     def __init__(self, sample_rate: int = 48000, num_channels: int = 1):
+        """Initialize with sample rate and channel count for deserialized frames."""
         super().__init__()
         self._sample_rate = sample_rate
         self._num_channels = num_channels
 
     async def serialize(self, frame: Frame) -> Optional[bytes]:
+        """Return raw PCM bytes for audio frames; None for all other frame types."""
         if isinstance(frame, OutputAudioRawFrame):
             return frame.audio
         return None
 
-    async def deserialize(self, data) -> Optional[Frame]:
+    async def deserialize(self, data) -> Optional[Frame]:  # type: ignore[override]
+        """Wrap raw PCM bytes in an InputAudioRawFrame; return None for non-bytes data."""
         if not isinstance(data, (bytes, bytearray, memoryview)):
             return None
         return InputAudioRawFrame(
