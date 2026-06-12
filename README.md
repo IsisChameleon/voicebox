@@ -1,6 +1,18 @@
 # voicebox
 
-MCP server that gives an LLM agent **voice + ears in a browser**. The agent drives a Playwright-controlled Chromium with an audio shim injected; the shim hijacks the page's microphone (fed by Kokoro TTS from this server) and tees the bot's remote WebRTC audio back to Whisper. The LLM can then act as a synthetic voice user against any web voice app — Daily, LiveKit, plain `RTCPeerConnection`, anything that uses `getUserMedia` + WebRTC — without the app being aware of the indirection.
+# voicebox
+
+**Give your coding agent a voice and ears so it can test your voice agent for you.**
+
+Testing a browser voice app means *being* the user: open the tab, join the call, talk, listen, try to break it — by hand, every time you touch a prompt. voicebox automates that loop. It's an MCP server that turns Claude into a synthetic voice user: Claude drives a real Chromium, speaks into the page's mic via local Kokoro TTS, and hears the agent's replies back via local Whisper.
+Hand it a task — *"start the story, interrupt halfway, then ask something off-topic"* — and it holds the conversation against your app and reports what happened.
+
+Works against anything using `getUserMedia` + WebRTC (Daily, LiveKit, plain `RTCPeerConnection`), with the app none the wiser. Local models by default — no API keys to run it.
+
+**Use it if** you're building a browser-based voice agent and you're tired of being its only tester.
+**Skip it (for now) if** your app isn't web-based or runs voice entirely server-side with no browser mic.
+
+When your coding agent starts a browser session in Voicebox, it drives a Playwright-controlled Chromium with an audio shim injected; the shim hijacks the page's microphone (fed by Kokoro TTS from this server) and tees the bot's remote WebRTC audio back to Whisper. The LLM can then act as a synthetic voice user against any web voice app — Daily, LiveKit, plain `RTCPeerConnection`, anything that uses `getUserMedia` + WebRTC — without the app being aware of the indirection.
 
 ## Topology
 
