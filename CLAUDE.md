@@ -38,8 +38,8 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
 | File | Role |
 |---|---|
 | `src/voicebox/server.py` | FastMCP HTTP surface (parent). The 4 tools Claude calls. No audio code. Ports: MCP 9090, audio 9091, CDP 9222. |
-| `src/voicebox/agent_ipc.py` | The parent↔pipecat-child mailbox: `multiprocessing.Queue` + child lifecycle. Uses `spawn` (not fork). |
-| `src/voicebox/bot.py` | The pipecat child's command loop: `read → dispatch(listen/speak/stop) → respond`. |
+| `src/voicebox/agent_ipc.py` | The parent↔pipecat-child mailbox: `multiprocessing.Queue` + child lifecycle. Uses `spawn` (not fork). Full-duplex: requests carry a correlation `id`; a response-router task resolves per-id futures, so commands overlap and responses may arrive out of order. |
+| `src/voicebox/bot.py` | The pipecat child's command loop: reads requests and spawns one task per command (`listen`/`speak`); `stop` cancels in-flight tasks and exits. |
 | `src/voicebox/agent.py` | `PipecatMCPAgent` — owns the Pipecat pipeline behind `WebsocketServerTransport`. STT/TTS/VAD/turn config lives here. |
 | `src/voicebox/runner_args.py` | `BrowserShimRunnerArguments` dataclass (host, port, mic_rate, tap_rate, record_dir). Pipecat ships none for plain WS-server transports. |
 | `src/voicebox/raw_pcm_serializer.py` | Tiny `FrameSerializer`: raw 16-bit LE mono PCM, no protobuf/envelope. |
