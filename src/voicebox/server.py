@@ -152,8 +152,17 @@ async def listen(timeout: float = 30.0) -> str:
     Args:
         timeout: Max seconds to wait. Returns "" on timeout.
 
+    Returns:
+        The transcribed utterance, "" on timeout, or the literal marker
+        "[voicebox event] audio client disconnected" if the in-page audio
+        connection dropped (this is a status event, NOT bot speech).
+
     """
-    result = await send_command("listen", timeout=timeout)
+    # Parent-side deadline: child enforces `timeout` on the utterance wait,
+    # the margin covers transcription of a long final utterance.
+    result = await send_command("listen", timeout=timeout, deadline=timeout + 30.0)
+    if result.get("event") == "client_disconnected":
+        return "[voicebox event] audio client disconnected"
     return result.get("text", "")
 
 
@@ -163,7 +172,7 @@ async def speak(text: str) -> bool:
 
     Returns true if the agent spoke the text, false otherwise.
     """
-    await send_command("speak", text=text)
+    await send_command("speak", text=text, deadline=60.0)
     return True
 
 
@@ -178,9 +187,14 @@ async def stop() -> bool:
     Returns true if the agent was stopped successfully, false otherwise.
     """
     try:
-        await send_command("stop")
+        await send_command("stop", deadline=30.0)
+    except Exception as e:
+        # A hung/dead child still gets reaped below — that's a stop too.
+        logger.warning(f"graceful stop failed ({e}); forcing child shutdown")
     finally:
-        # Best-effort browser teardown — never block stopping pipecat on it.
+        # Reap the child process and release the IPC queues, then tear down
+        # the browser — best-effort, never block one on the other.
+        await asyncio.to_thread(stop_pipecat_process)
         try:
             await asyncio.to_thread(stop_browser)
         except Exception as e:

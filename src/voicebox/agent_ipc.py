@@ -14,6 +14,7 @@ process runs separately to avoid stdio collisions with the MCP protocol.
 import asyncio
 import multiprocessing
 import queue as queue_module
+import time
 from typing import Optional
 
 from loguru import logger
@@ -191,30 +192,54 @@ def _check_process_alive():
         raise RuntimeError("Voice agent process has stopped")
 
 
-async def _wait_for_command_response(timeout: float = 0.5) -> dict:
-    """Wait for response from child process with health checks."""
+async def _wait_for_command_response(
+    timeout: float = 0.5, deadline: Optional[float] = None
+) -> dict:
+    """Wait for response from child process with health checks.
+
+    Args:
+        timeout: Poll interval for each queue read, in seconds.
+        deadline: Overall max seconds to wait for the response. ``None``
+            waits forever (as long as the child process stays alive).
+
+    Raises:
+        TimeoutError: If ``deadline`` elapses without a response.
+
+    """
     if _response_queue is None:
         raise RuntimeError("Pipecat process not started")
 
     loop = asyncio.get_event_loop()
+    start = time.monotonic()
 
     while True:
         try:
             return await loop.run_in_executor(None, _get_with_timeout, _response_queue, timeout)
         except TimeoutError:
             _check_process_alive()
+            if deadline is not None and time.monotonic() - start > deadline:
+                raise TimeoutError(f"No response from the voice agent within {deadline}s") from None
             await asyncio.sleep(0)  # Yield to allow cancellation
 
 
-async def send_command(cmd: str, **kwargs) -> dict:
+async def send_command(cmd: str, deadline: Optional[float] = None, **kwargs) -> dict:
     """Send a command to the Pipecat child process and wait for response.
 
     Args:
         cmd: Command name (e.g., "listen", "speak", "stop").
+        deadline: Overall max seconds to wait for the child's response, so a
+            hung child can't block the calling MCP tool forever. ``None``
+            waits indefinitely.
         **kwargs: Additional arguments for the command.
 
     Returns:
         Response dictionary from the child process.
+
+    Raises:
+        RuntimeError: If the child reports a failure (``error`` key in the
+            response). Surfaces to the MCP client as a tool error instead of
+            leaking into the result payload.
+        TimeoutError: If ``deadline`` elapses without a response.
 
     """
     if _cmd_queue is None or _response_queue is None:
@@ -228,14 +253,14 @@ async def send_command(cmd: str, **kwargs) -> dict:
 
     # Wait for response with cancellation support
     try:
-        response = await _wait_for_command_response()
+        response = await _wait_for_command_response(deadline=deadline)
     except asyncio.CancelledError:
         logger.info(f"Command '{cmd}' was cancelled")
         raise
 
-    # Check for errors in response
     if "error" in response:
         error_message = response["error"]
         logger.error(f"Error running command '{cmd}': {error_message}")
+        raise RuntimeError(f"voicebox command '{cmd}' failed: {error_message}")
 
     return response

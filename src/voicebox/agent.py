@@ -40,6 +40,10 @@ from pipecat.services.stt_service import STTService
 from pipecat.services.tts_service import TTSService
 from pipecat.services.whisper.stt import WhisperSTTService, WhisperSTTServiceMLX
 from pipecat.transports.base_transport import BaseTransport
+from pipecat.turns.user_start import (
+    TranscriptionUserTurnStartStrategy,
+    VADUserTurnStartStrategy,
+)
 from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
     TurnAnalyzerUserTurnStopStrategy,
 )
@@ -50,6 +54,12 @@ from voicebox.raw_pcm_serializer import RawPCMSerializer
 from voicebox.runner_args import BrowserShimRunnerArguments
 
 load_dotenv(override=True)
+
+# Sentinel pushed into the transcript queue when the browser shim's WebSocket
+# drops, so a blocked listen() wakes up. Interim mechanism until the event-
+# stream listen (Stage 2) exists — bot.py translates it into a structured
+# {"event": "client_disconnected"} response instead of fake bot speech.
+CLIENT_DISCONNECTED = "__voicebox_client_disconnected__"
 
 
 class PipecatMCPAgent:
@@ -91,9 +101,18 @@ class PipecatMCPAgent:
             context,
             user_params=LLMUserAggregatorParams(
                 user_turn_strategies=UserTurnStrategies(
+                    # The "user" of this pipeline is the REMOTE BOT (its audio
+                    # is our input). The default start strategies ship with
+                    # enable_interruptions=True, which cancels our in-flight
+                    # Kokoro TTS the moment the bot makes a sound — a synthetic
+                    # human must be able to keep talking (and talk over the bot).
+                    start=[
+                        VADUserTurnStartStrategy(enable_interruptions=False),
+                        TranscriptionUserTurnStartStrategy(enable_interruptions=False),
+                    ],
                     stop=[
                         TurnAnalyzerUserTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3())
-                    ]
+                    ],
                 ),
                 # 1.0s captures complete utterances over WebRTC with natural
                 # pauses; 0.2s (pipecat's default for clean TTS sources) chops
@@ -148,7 +167,7 @@ class PipecatMCPAgent:
             logger.info("Client disconnected")
             if not self._pipeline_task:
                 return
-            await self._user_speech_queue.put("I just disconnected, but I might come back.")
+            await self._user_speech_queue.put(CLIENT_DISCONNECTED)
 
         @user_aggregator.event_handler("on_user_turn_stopped")
         async def on_user_turn_stopped(aggregator, strategy, message: UserTurnStoppedMessage):

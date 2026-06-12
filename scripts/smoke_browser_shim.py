@@ -35,10 +35,16 @@ async def main():
     )
     from voicebox.browser_session import start_browser, stop_browser
     from voicebox.runner_args import BrowserShimRunnerArguments
+    from voicebox.server import _assert_port_free
 
     audio_port = 9091
     cdp_port = 9222
     audio_ws_url = f"ws://localhost:{audio_port}"
+
+    # Fail fast on a stale session squatting the ports — a busy audio port
+    # otherwise leaves the shim's WS retrying forever and speak() hanging.
+    _assert_port_free(audio_port, "audio_port")
+    _assert_port_free(cdp_port, "cdp_port")
 
     logger.info("=== starting pipecat in browser-shim mode ===")
     start_pipecat_process(BrowserShimRunnerArguments(host="localhost", port=audio_port))
@@ -95,7 +101,7 @@ async def main():
             logger.warning("⚠ mic hook not installed — secure-context issue?")
 
         logger.info("=== sending speak() ===")
-        r = await send_command("speak", text="hello world this is a test")
+        r = await send_command("speak", text="hello world this is a test", deadline=60.0)
         logger.info(f"speak response: {r}")
 
         await asyncio.sleep(5)

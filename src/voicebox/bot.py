@@ -16,7 +16,7 @@ import asyncio
 from loguru import logger
 from pipecat.runner.types import RunnerArguments
 
-from voicebox.agent import create_agent
+from voicebox.agent import CLIENT_DISCONNECTED, create_agent
 from voicebox.agent_ipc import read_request, send_response
 
 
@@ -24,9 +24,13 @@ async def bot(runner_args: RunnerArguments):
     """Start the Pipecat agent and run the command loop.
 
     Supported commands:
-        listen: Wait for an utterance, respond with ``{"text": "..."}``.
+        listen: Wait for an utterance, respond with ``{"text": "..."}``; if the
+            shim's WebSocket dropped instead, respond with
+            ``{"text": "", "event": "client_disconnected"}``.
         speak:  Speak the provided text, respond with ``{"ok": True}``.
         stop:   Stop the agent and exit the loop, respond with ``{"ok": True}``.
+
+    Failures respond on the ``error`` key and the loop keeps serving commands.
     """
     agent = await create_agent(runner_args)
     await agent.start()
@@ -45,7 +49,10 @@ async def bot(runner_args: RunnerArguments):
                     text = await asyncio.wait_for(agent.listen(), timeout=timeout)
                 except asyncio.TimeoutError:
                     text = ""
-                await send_response({"text": text})
+                if text == CLIENT_DISCONNECTED:
+                    await send_response({"text": "", "event": "client_disconnected"})
+                else:
+                    await send_response({"text": text})
             elif cmd == "speak":
                 await agent.speak(request["text"])
                 await send_response({"ok": True})
@@ -57,6 +64,7 @@ async def bot(runner_args: RunnerArguments):
                 await send_response({"error": f"Unknown command: {cmd}"})
             logger.debug(f"Command '{cmd}' finished")
         except Exception as e:
+            # Report the failure on the error key (never as a transcript) and
+            # keep serving commands — one bad command must not end the session.
             logger.warning(f"Error processing command '{cmd}': {e}")
-            await send_response({"text": str(e)})
-            break
+            await send_response({"error": str(e)})
