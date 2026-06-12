@@ -48,6 +48,7 @@
     audioWsUrl: AUDIO_WS_URL,
     pcCount: 0,
     audioTrackCount: 0,
+    micTrackCount: 0,
     // The sample rate of the FIRST outbound AudioData chunk we observed.
     // For Daily/WebRTC tracks in Chrome this is typically 48000, but record
     // it so we can verify / detect mismatches against the pipecat side.
@@ -69,8 +70,26 @@
   };
 
   let ws = null;
-  let micWriter = null;
+  // One writer per synthetic mic track. Apps call getUserMedia(audio) more
+  // than once (mic-check UI, device-change handlers, reconnection); every
+  // returned track must keep receiving audio, so inbound frames fan out to
+  // all live writers instead of only the most recent one.
+  const micWriters = new Set();
   let pendingInbound = [];
+
+  // AudioData is consumed by write(), so each additional writer gets a
+  // clone. A failed write means the page stopped that track's generator —
+  // drop the writer.
+  function writeToMicWriters(frame) {
+    const writers = [...micWriters];
+    writers.forEach((w, i) => {
+      const f = i === writers.length - 1 ? frame : frame.clone();
+      w.write(f).catch(() => {
+        micWriters.delete(w);
+        diag.micTrackCount = micWriters.size;
+      });
+    });
+  }
 
   function openWs() {
     try {
@@ -107,8 +126,8 @@
           timestamp: performance.now() * 1000,
           data: float32,
         });
-        if (micWriter) {
-          micWriter.write(frame).catch(() => {});
+        if (micWriters.size > 0) {
+          writeToMicWriters(frame);
         } else {
           pendingInbound.push(frame);
         }
@@ -122,10 +141,12 @@
 
   function makeSyntheticMicStream() {
     const generator = new MediaStreamTrackGenerator({ kind: 'audio' });
-    micWriter = generator.writable.getWriter();
-    for (const f of pendingInbound) micWriter.write(f).catch(() => {});
+    const writer = generator.writable.getWriter();
+    micWriters.add(writer);
+    diag.micTrackCount = micWriters.size;
+    for (const f of pendingInbound) writer.write(f).catch(() => {});
     pendingInbound = [];
-    console.log(TAG, 'created synthetic mic stream');
+    console.log(TAG, 'created synthetic mic stream', { liveMicTracks: micWriters.size });
     return new MediaStream([generator]);
   }
 
