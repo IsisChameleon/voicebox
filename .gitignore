@@ -45,3 +45,4 @@ whisker_setup.py
 artifacts/**/*.png
 artifacts/**/*.wav
 artifacts/**/*.log
+artifacts/**/*.json
