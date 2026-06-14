@@ -79,6 +79,7 @@ async def start_browser_session(
     cdp_port: int = 9222,
     audio_port: int = 9091,
     user_data_dir: str | None = None,
+    record_dir: str | None = None,
 ) -> dict:
     """Launch a Playwright-controlled Chromium with the browser audio shim injected.
 
@@ -117,6 +118,9 @@ async def start_browser_session(
         audio_port: Local port the WebSocket audio transport listens on.
         user_data_dir: Persistent Chrome profile dir to reuse an authenticated
             session across runs.
+        record_dir: If set, ``stop()`` writes ``kokoro_voice.wav`` (the tester),
+            ``ember_voice.wav`` (the app bot) and ``merged.wav`` (both mixed)
+            into this directory, so the whole conversation can be played back.
 
     Returns:
         ``{cdp_endpoint, audio_ws_url, playwright_mcp_env, attach_hint}``.
@@ -125,7 +129,9 @@ async def start_browser_session(
     _assert_port_free(audio_port, "audio_port")
     _assert_port_free(cdp_port, "cdp_port")
     audio_ws_url = f"ws://localhost:{audio_port}"
-    start_pipecat_process(BrowserShimRunnerArguments(host="localhost", port=audio_port))
+    start_pipecat_process(
+        BrowserShimRunnerArguments(host="localhost", port=audio_port, record_dir=record_dir)
+    )
     try:
         info = await asyncio.to_thread(
             start_browser,
