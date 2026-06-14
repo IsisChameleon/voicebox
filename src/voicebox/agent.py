@@ -43,8 +43,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineTask
+from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
@@ -65,6 +64,7 @@ from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
     TurnAnalyzerUserTurnStopStrategy,
 )
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
+from pipecat.workers.runner import WorkerRunner
 
 from voicebox.events import (
     EventType,
@@ -204,8 +204,8 @@ class PipecatMCPAgent:
         self._audio_buffer = None  # type: ignore[assignment]
 
         self._task: Optional[asyncio.Task] = None
-        self._pipeline_task: Optional[PipelineTask] = None
-        self._pipeline_runner: Optional[PipelineRunner] = None
+        self._pipeline_task: Optional[PipelineWorker] = None
+        self._pipeline_runner: Optional[WorkerRunner] = None
         self._connected = asyncio.Event()
 
         # Monotonic event log; listen_events() blocks on the condition until
@@ -321,14 +321,14 @@ class PipecatMCPAgent:
         # enable_rtvi=False: we are a headless synthetic user, not an RTVI
         # client. Conversation events reach Claude via listen_events()'s
         # return value, not via data-channel notifications.
-        self._pipeline_task = PipelineTask(
+        self._pipeline_task = PipelineWorker(
             pipeline,
             cancel_on_idle_timeout=False,
             enable_rtvi=False,
             observers=[_PipelineEventObserver(self)],
         )
 
-        self._pipeline_runner = PipelineRunner(handle_sigterm=True)
+        self._pipeline_runner = WorkerRunner(handle_sigterm=True)
 
         @self._transport.event_handler("on_client_connected")
         async def on_connected(transport, client):
@@ -363,7 +363,11 @@ class PipecatMCPAgent:
             )
         )
 
-        self._task = asyncio.create_task(self._pipeline_runner.run(self._pipeline_task))
+        # 1.3.0: register the worker via add_workers() before run() — passing it
+        # to run() directly is deprecated. run() (auto_end=True) returns when the
+        # worker finishes (our EndFrame in stop()).
+        await self._pipeline_runner.add_workers(self._pipeline_task)
+        self._task = asyncio.create_task(self._pipeline_runner.run())
 
         if self._audio_buffer is not None:
 
@@ -530,8 +534,12 @@ class PipecatMCPAgent:
 
     def _create_stt_service(self) -> STTService:
         if sys.platform == "darwin":
-            return WhisperSTTServiceMLX(model="mlx-community/whisper-large-v3-turbo")
-        return WhisperSTTService(model="Systran/faster-distil-whisper-large-v3")
+            return WhisperSTTServiceMLX(
+                settings=WhisperSTTServiceMLX.Settings(model="mlx-community/whisper-large-v3-turbo")
+            )
+        return WhisperSTTService(
+            settings=WhisperSTTService.Settings(model="Systran/faster-distil-whisper-large-v3")
+        )
 
     def _create_tts_service(self) -> TTSService:
         return KokoroTTSService(voice_id="af_heart")
