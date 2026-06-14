@@ -31,9 +31,11 @@ async def bot(runner_args: RunnerArguments):
     Supported commands (all requests/responses carry a correlation ``id``):
         listen: Wait for conversation events past ``cursor``, respond with
             ``{"events": [...], "cursor": <next>}`` (empty events on timeout).
-        speak:  Speak the provided text; with ``wait`` respond after playout
-            with ``{"queued", "started_at", "finished_at", "interrupted"}``,
-            otherwise respond ``{"queued": True}`` immediately.
+        speak:  Speak the provided text; with ``wait_for_playout`` respond after
+            playout with ``{"queued", "started_at", "finished_at", "interrupted"}``,
+            otherwise respond ``{"queued": True}`` immediately. Supports
+            ``wait_for_turn`` (speak once the app bot is silent) and a one-shot
+            ``when``/``timer_secs`` barge-in trigger (responds ``{"armed": True}``).
         stop:   Cancel in-flight commands, stop the agent and exit the loop,
             respond with ``{"ok": True}``.
 
@@ -55,7 +57,13 @@ async def bot(runner_args: RunnerArguments):
                     cursor=request.get("cursor", 0),
                 )
             elif cmd == "speak":
-                response = await agent.speak(request["text"], wait=request.get("wait", False))
+                response = await agent.speak(
+                    request["text"],
+                    wait_for_playout=request.get("wait_for_playout", False),
+                    wait_for_turn=request.get("wait_for_turn", False),
+                    when=request.get("when"),
+                    timer_secs=request.get("timer_secs", 0.0),
+                )
             else:
                 response = {"error": f"Unknown command: {cmd}"}
         except asyncio.CancelledError:

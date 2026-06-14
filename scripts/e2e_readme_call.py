@@ -290,7 +290,7 @@ async def main():
                 spoke = await send_command(
                     "speak",
                     text="Hi Ember! Can you tell me about this book in one short sentence?",
-                    wait=True,
+                    wait_for_playout=True,
                     deadline=150.0,
                 )
                 logger.info(f"our playout: {spoke}")

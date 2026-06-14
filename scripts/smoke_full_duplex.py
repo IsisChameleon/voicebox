@@ -11,7 +11,7 @@ Spawns the pipecat child + a shim-injected Chromium (same plumbing as
      during that window, and that the pending listen resolves with the
      ``tester_speech_started`` event our own speak produced (out-of-order
      responses routed by correlation id).
-  4. Issues ``speak(wait=True)`` and asserts a usable playout span
+  4. Issues ``speak(wait_for_playout=True)`` and asserts a usable playout span
      (``started_at`` < ``finished_at``) is reported.
 
 Run: ``uv run python scripts/smoke_full_duplex.py``
@@ -117,18 +117,24 @@ async def main():
         cursor = listen_response["cursor"]
         types = [e["type"] for e in listen_response["events"]]
         logger.info(f"listen resolved with events: {types}")
-        if "tester_speech_started" in types:
-            logger.success("✓ the pending listen captured our own speak as tester_speech events")
+        # speak() emits tester_transcript synchronously, then tester_speech_*
+        # once the audio plays out; the pending listen wakes on whichever lands
+        # first (tester_transcript). Either proves it captured our own speak.
+        if "tester_transcript" in types or "tester_speech_started" in types:
+            logger.success("✓ the pending listen captured our own speak")
         else:
-            failures.append(f"expected tester_speech_started in the listen events, got {types}")
+            failures.append(f"expected our speak's events in the listen, got {types}")
     except Exception as e:
         failures.append(f"listen failed: {e}")
 
-    logger.info("=== speak(wait=True) — playout timing ===")
+    logger.info("=== speak(wait_for_playout=True) — playout timing ===")
     timed = await send_command(
-        "speak", text="and this one waits for playout to finish", wait=True, deadline=150.0
+        "speak",
+        text="and this one waits for playout to finish",
+        wait_for_playout=True,
+        deadline=150.0,
     )
-    logger.info(f"speak(wait=True) response: {timed}")
+    logger.info(f"speak(wait_for_playout=True) response: {timed}")
     started, finished = timed.get("started_at"), timed.get("finished_at")
     if started and finished and finished > started:
         logger.success(
@@ -136,7 +142,7 @@ async def main():
             f"interrupted={timed.get('interrupted')}"
         )
     else:
-        failures.append(f"speak(wait=True) returned no usable playout span: {timed}")
+        failures.append(f"speak(wait_for_playout=True) returned no usable playout span: {timed}")
 
     logger.info("=== teardown ===")
     try:

@@ -60,18 +60,28 @@ change — gives streaming-ish awareness, proper disconnect signaling, and laten
 
 ## Stage 3 — Declarative barge-in primitives
 
-Real-time interruption can't live in the LLM loop (seconds of latency); the child executes it at
-audio-rate, Claude scripts it — the "Interrupter persona" pattern every commercial tool uses.
+Real-time interruption can't live in the LLM loop (seconds of latency); the child schedules it at
+audio-rate, Claude arms it. Mind the two-pipeline reality: voicebox only puts audio into the app's
+mic and observes the app's audio coming back — it never "interrupts the app bot" with a frame.
+Whether the app stops talking is the app's own decision (its VAD/turn logic), which is exactly the
+thing under test. So barge-in testing = **time our speech to overlap the bot's, then read the
+reaction off the event log.** `speak` gains three start-timing modes, layered on the existing Stage 2
+`wait_for_playout` flag (block until OUR audio finishes, returning the span — renamed from `wait`):
 
-- `speak(text, interrupt=True)` — start TTS immediately even mid-bot-utterance (possible since 0.1).
-- `speak(text, when="bot_speaking", after_secs=1.5)` — child arms a one-shot trigger on the next
-  `bot_speech_started`, waits `after_secs`, then speaks. Returns the armed/fired timing in the
-  event log.
+- `speak(text)` — speak now, regardless of bot state. The LLM can't reliably predict whether a given
+  utterance lands mid-bot-turn, so there is no "talk over" boolean; it just talks.
+- `speak(text, wait_for_turn=True)` — block until the app bot is silent, then speak (the polite
+  path); speaks immediately if already silent.
+- `speak(text, when="app_bot_speech_started", timer_secs=1.5)` — arm a one-shot trigger: on the next
+  occurrence of the named event, wait `timer_secs`, then speak — the reproducible barge-in. Returns
+  `{armed: True}` immediately; arming and firing are logged as `tester_barge_in_armed` (records
+  `when`, `timer_secs`, `text`) and `tester_barge_in_fired` (records `when`, `triggered_by_t`).
+
 - Derived metric: **interruption stoppage timing** — from the event log,
-  `bot_speech_stopped − tts_started` when we barge in (industry budget: ~60 ms for the app under
-  test to stop talking).
+  `app_bot_speech_stopped − tester_speech_started` when we barge in (industry budget: ~60 ms for the
+  app under test to stop talking; subtract the VAD `stop_secs` lag recorded in the session header).
 
-**Verify:** scripted barge-in against the readme app: assert overlap window exists in the stereo
+**Verify:** scripted barge-in against the readme app: assert an overlap window exists in the stereo
 recording and the stoppage-timing number is plausible vs. the waveform.
 
 ## Stage 4 — Metrics & artifacts (the "test report")

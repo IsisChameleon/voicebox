@@ -40,6 +40,8 @@ class EventType(str, Enum):
     TESTER_SPEECH_STOPPED = "tester_speech_stopped"
     TESTER_SPEECH_INTERRUPTED = "tester_speech_interrupted"
     TESTER_TRANSCRIPT = "tester_transcript"
+    TESTER_BARGE_IN_ARMED = "tester_barge_in_armed"
+    TESTER_BARGE_IN_FIRED = "tester_barge_in_fired"
 
 
 class VoiceboxEvent(BaseModel):
@@ -90,3 +92,30 @@ class TesterTranscriptEvent(VoiceboxEvent):
 
     type: EventType = EventType.TESTER_TRANSCRIPT
     text: str
+
+
+class TesterBargeInArmedEvent(VoiceboxEvent):
+    """A one-shot barge-in trigger was armed via ``speak(when=...)``.
+
+    Emitted immediately when the trigger is registered, before the agent
+    returns ``{"armed": True}``. The trigger waits for the next ``when`` event,
+    sleeps ``timer_secs``, then speaks ``text``.
+    """
+
+    type: EventType = EventType.TESTER_BARGE_IN_ARMED
+    when: str
+    timer_secs: float
+    text: str
+
+
+class TesterBargeInFiredEvent(VoiceboxEvent):
+    """An armed barge-in trigger fired and is about to speak.
+
+    Emitted right before the tester speaks, after the ``timer_secs`` delay
+    elapsed. ``triggered_by_t`` is the ``t`` of the ``when`` event that fired
+    the trigger.
+    """
+
+    type: EventType = EventType.TESTER_BARGE_IN_FIRED
+    when: str
+    triggered_by_t: float

@@ -194,21 +194,62 @@ async def listen(timeout: float = 30.0, cursor: int = 0) -> dict:
 
 
 @mcp.tool()
-async def speak(text: str, wait: bool = False) -> dict:
+async def speak(
+    text: str,
+    wait_for_playout: bool = False,
+    wait_for_turn: bool = False,
+    when: str | None = None,
+    timer_secs: float = 0.0,
+) -> dict:
     """Speak the given text into the page's microphone via text-to-speech.
+
+    Barge-in testing means TIMING our speech relative to the app bot's and then
+    observing the bot's reaction via ``listen()`` — we never interrupt the bot
+    directly (it is reached only through its microphone).
+
+    ``wait_for_turn`` and ``when`` control WHEN we start speaking;
+    ``wait_for_playout`` controls WHEN this call returns. They are independent.
 
     Args:
         text: The text to speak.
-        wait: When false (default), returns as soon as the speech is queued.
-            When true, returns only after our audio finished playing out,
-            with ``started_at`` / ``finished_at`` wall-clock seconds and an
-            ``interrupted`` flag — useful for timing-sensitive scripts.
+        wait_for_playout: When false (default), returns as soon as the speech is
+            queued (``{"queued": True}``). When true, returns only after OUR OWN
+            audio has finished playing out, with ``started_at`` / ``finished_at``
+            wall-clock seconds and an ``interrupted`` flag — useful for
+            timing-sensitive scripts. This waits for our Kokoro audio to finish;
+            it says nothing about the app bot. Ignored when ``when`` is set (the
+            call returns immediately).
+        wait_for_turn: When true, wait until the app bot is not currently
+            speaking, then speak (the polite path). Speaks immediately if it is
+            already silent.
+        when: An event type to arm a ONE-SHOT barge-in trigger on. When set,
+            returns ``{"armed": True}`` immediately, then in the background
+            waits for the NEXT occurrence of that event, sleeps ``timer_secs``,
+            and speaks. Canonical use:
+            ``when="app_bot_speech_started", timer_secs=1.5``.
+        timer_secs: Seconds to wait after the ``when`` event fires before
+            speaking. Only meaningful with ``when``.
 
     Returns:
-        ``{"queued": True}``, plus the playout timing fields when ``wait``.
+        ``{"armed": True}`` when ``when`` is set; otherwise ``{"queued": True}``,
+        plus the playout timing fields when ``wait_for_playout`` is true.
 
     """
-    return await send_command("speak", text=text, wait=wait, deadline=150.0 if wait else 60.0)
+    if when is not None:
+        deadline = 60.0  # armed, returns immediately
+    elif wait_for_playout or wait_for_turn:
+        deadline = 150.0
+    else:
+        deadline = 60.0
+    return await send_command(
+        "speak",
+        text=text,
+        wait_for_playout=wait_for_playout,
+        wait_for_turn=wait_for_turn,
+        when=when,
+        timer_secs=timer_secs,
+        deadline=deadline,
+    )
 
 
 @mcp.tool()
