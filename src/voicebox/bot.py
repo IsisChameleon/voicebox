@@ -75,13 +75,18 @@ async def bot(runner_args: RunnerArguments):
         logger.debug(f"Command '{cmd}' received, dispatching...")
 
         if cmd == "stop":
-            # Cancel in-flight commands first (a pending listen would block
-            # forever once the pipeline is gone), then stop and acknowledge.
-            for task in in_flight:
-                task.cancel()
-            await asyncio.gather(*in_flight, return_exceptions=True)
+            # Stop the agent FIRST: it emits SESSION_STOPPED and wakes any
+            # pending listen_events(), so those return cleanly instead of being
+            # cancelled mid-wait. Then drain in-flight briefly (let the woken
+            # listens send their responses) and cancel any stragglers (e.g. a
+            # speak still awaiting playout) before acknowledging.
             try:
                 await agent.stop()
+                if in_flight:
+                    await asyncio.wait(in_flight, timeout=2.0)
+                    for task in in_flight:
+                        task.cancel()
+                    await asyncio.gather(*in_flight, return_exceptions=True)
                 await send_response({"id": request.get("id"), "ok": True})
             except Exception as e:
                 logger.warning(f"Error stopping the agent: {e}")

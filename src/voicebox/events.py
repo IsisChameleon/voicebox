@@ -30,6 +30,7 @@ class EventType(str, Enum):
     """The complete set of conversation-event names ``listen()`` can emit."""
 
     SESSION_STARTED = "session_started"
+    SESSION_STOPPED = "session_stopped"
     CLIENT_CONNECTED = "client_connected"
     CLIENT_DISCONNECTED = "client_disconnected"
     APP_BOT_SPEECH_STARTED = "app_bot_speech_started"
@@ -38,6 +39,7 @@ class EventType(str, Enum):
     TESTER_SPEECH_STARTED = "tester_speech_started"
     TESTER_SPEECH_STOPPED = "tester_speech_stopped"
     TESTER_SPEECH_INTERRUPTED = "tester_speech_interrupted"
+    TESTER_TRANSCRIPT = "tester_transcript"
 
 
 class VoiceboxEvent(BaseModel):
@@ -76,3 +78,15 @@ class TranscriptEvent(VoiceboxEvent):
     type: EventType = EventType.APP_BOT_TRANSCRIPT
     text: str
     turn_started_at: str
+
+
+class TesterTranscriptEvent(VoiceboxEvent):
+    """The exact text the tester (us) spoke via ``speak()``.
+
+    Unlike ``app_bot_transcript`` (recovered from audio via STT), this is the
+    ground-truth input string — exact, and emitted at speak time rather than
+    after batch STT.
+    """
+
+    type: EventType = EventType.TESTER_TRANSCRIPT
+    text: str

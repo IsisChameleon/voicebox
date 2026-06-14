@@ -66,7 +66,13 @@ from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
 )
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
-from voicebox.events import EventType, SessionStartedEvent, TranscriptEvent, VoiceboxEvent
+from voicebox.events import (
+    EventType,
+    SessionStartedEvent,
+    TesterTranscriptEvent,
+    TranscriptEvent,
+    VoiceboxEvent,
+)
 from voicebox.processors.kokoro_tts import KokoroTTSService
 from voicebox.raw_pcm_serializer import RawPCMSerializer
 from voicebox.runner_args import BrowserShimRunnerArguments
@@ -378,6 +384,10 @@ class PipecatMCPAgent:
 
         logger.info("Stopping Pipecat MCP agent...")
 
+        # Signal session end FIRST so a pending listen_events() returns this
+        # event instead of being cancelled mid-wait when the pipeline tears down.
+        await self._emit(VoiceboxEvent(type=EventType.SESSION_STOPPED))
+
         # Flush recordings BEFORE EndFrame propagates — the audio buffer
         # processor is closed after EndFrame.
         if self._audio_buffer is not None and self._record_dir:
@@ -485,6 +495,10 @@ class PipecatMCPAgent:
             raise RuntimeError("Pipecat MCP Agent not initialized")
 
         await self._connected.wait()
+
+        # Log what we said (ground-truth input, not STT) so the event stream is
+        # a complete two-sided transcript.
+        await self._emit(TesterTranscriptEvent(text=text))
 
         if not wait:
             await self._queue_speak_frames(text)

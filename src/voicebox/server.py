@@ -160,6 +160,8 @@ async def listen(timeout: float = 30.0, cursor: int = 0) -> dict:
     is our synthetic human (Kokoro TTS). Event types (each has ``"t"``,
     wall-clock seconds):
       * ``session_started`` — log header; carries ``vad_stop_secs``.
+      * ``session_stopped`` — the session is tearing down (``stop()`` was
+        called); a pending ``listen()`` returns this instead of being cancelled.
       * ``client_connected`` / ``client_disconnected`` — the in-page audio
         link came up / dropped (a drop is a status event, NOT speech).
       * ``app_bot_speech_started`` / ``app_bot_speech_stopped`` — the app
@@ -171,6 +173,8 @@ async def listen(timeout: float = 30.0, cursor: int = 0) -> dict:
       * ``tester_speech_started`` / ``tester_speech_stopped`` /
         ``tester_speech_interrupted`` — OUR synthetic voice starting /
         finishing / being cut off at playout.
+      * ``tester_transcript`` — the exact text WE spoke (``text``); the
+        ground-truth ``speak()`` input, emitted at speak time (not via STT).
 
     To simply wait for the next thing the app bot says: call in a loop with
     the advancing cursor and act on ``app_bot_transcript`` events.
