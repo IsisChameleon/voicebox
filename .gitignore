@@ -41,7 +41,11 @@ MANIFEST
 # Pipecat
 whisker_setup.py
 
+# playwright-cli working dir (snapshots + console logs)
+.playwright-cli/
+
 # E2E test artifacts (committed selectively below)
 artifacts/**/*.png
 artifacts/**/*.wav
 artifacts/**/*.log
+artifacts/**/*.json

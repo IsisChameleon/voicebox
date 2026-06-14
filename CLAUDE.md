@@ -52,8 +52,8 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
 ## MCP tools (`server.py`)
 
 - `start_browser_session(url, headless=False, cdp_port=9222, audio_port=9091)` → `{cdp_endpoint, audio_ws_url}`
-- `speak(text)` → queues Kokoro frames (returns when queued, NOT when audio finishes)
-- `listen(timeout=30)` → VAD-segmented transcript string, `""` on timeout. **Returns text only — no timestamps.**
+- `speak(text, wait=False)` → `{queued: true}` when queued; with `wait=True` resolves after playout with `{started_at, finished_at, interrupted}`
+- `listen(timeout=30, cursor=0)` → `{events: [...], cursor}` — timestamped conversation events (`session_started`, `client_connected/disconnected`, `app_bot_speech_started/stopped`, `app_bot_transcript`, `tester_speech_started/stopped/interrupted`); pass the returned cursor back to resume; empty `events` on timeout. Two parties: **app_bot** = the app's voice agent under test, **tester** = our synthetic user. Event vocabulary lives in `events.py`.
 - `stop()` → tears down pipecat child + browser child
 
 ## Non-obvious facts & traps (verified, don't re-derive)
@@ -73,11 +73,11 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
   `2b3d7f1`).
 - **`enable_rtvi=False`** (`agent.py:133-137`) — we're a headless synthetic user; transcripts reach
   Claude via `listen()`'s return value, not RTVI data-channel notifications.
-- **Timestamps ARE available but discarded.** `UserTurnStoppedMessage.timestamp` (turn start) is
-  dropped at `agent.py:155`; `VADUserStartedSpeakingFrame`/`VADUserStoppedSpeakingFrame` carry
-  wall-clock `time.time()` (pipecat `frames.py:1030-1057`). STT is batch+VAD-segmented, so true
-  real-time *per-word* receive timestamps are NOT obtainable — only utterance-level wall-clock, or
-  word offsets *within* a segment.
+- **Timestamps surface via the event log** (Stage 2): a pipeline observer in `agent.py` turns
+  `VADUserStarted/StoppedSpeakingFrame` (wall-clock `timestamp`), `BotStarted/StoppedSpeakingFrame`
+  (our playout span) and `UserTurnStoppedMessage` into `listen()` events. Still true: STT is
+  batch+VAD-segmented, so *per-word* receive timestamps are NOT obtainable — utterance-level only,
+  and `bot_speech_stopped.t` lands ~`vad_stop_secs` (1.0 s) late by construction.
 - **`record_dir` exists** (`runner_args.py`, `agent.py:105-128,194-231`): set it and `stop()` writes
   user/bot/merged WAVs via `AudioBufferProcessor`. Snapshot buffers BEFORE `stop_recording()` — it
   resets them.

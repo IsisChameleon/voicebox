@@ -33,6 +33,44 @@ EMAIL = "isabelledebacker@live.com.au"
 PASSWORD = "embertales456"
 
 
+async def listen_for_transcript(send_command, timeout: float, cursor: int) -> tuple[str, int]:
+    """Drain listen() events until a transcript arrives or ``timeout`` expires.
+
+    Returns:
+        ``(text, cursor)`` — ``text`` is ``""`` if no transcript arrived.
+
+    """
+    deadline = asyncio.get_event_loop().time() + timeout
+    while True:
+        remaining = deadline - asyncio.get_event_loop().time()
+        if remaining <= 0:
+            return "", cursor
+        r = await send_command(
+            "listen", timeout=remaining, cursor=cursor, deadline=remaining + 30.0
+        )
+        cursor = r["cursor"]
+        for ev in r["events"]:
+            logger.info(f"event: {ev}")
+            if ev["type"] == "app_bot_transcript":
+                return ev["text"], cursor
+
+
+def report_response_gaps(events: list[dict]):
+    """Log per-turn response latency: tester_speech_stopped → app_bot_speech_started.
+
+    This is the Stage 2 verify metric — the gap should match the silence
+    visible between our voice and Ember's reply in the merged WAV.
+    """
+    last_tester_stopped = None
+    for ev in events:
+        if ev["type"] == "tester_speech_stopped":
+            last_tester_stopped = ev["t"]
+        elif ev["type"] == "app_bot_speech_started" and last_tester_stopped is not None:
+            gap = ev["t"] - last_tester_stopped
+            logger.info(f"response gap (our speech end → app bot speech start): {gap:.2f}s")
+            last_tester_stopped = None
+
+
 async def login(page, email: str, password: str):
     """Navigate to login if needed and submit credentials."""
     logger.info(f"page url: {page.url}")
@@ -237,32 +275,51 @@ async def main():
 
                 await dump_shim()
 
+                cursor = 0
+
                 # Ember likely greets first — listen briefly to catch any opening line.
                 logger.info("=== listen (initial greeting) ===")
-                r0 = await send_command("listen", timeout=20.0)
-                logger.info(f"ember (greeting): {r0.get('text', '')!r}")
+                greeting, cursor = await listen_for_transcript(send_command, 20.0, cursor)
+                logger.info(f"ember (greeting): {greeting!r}")
 
                 await dump_shim()
 
-                # First turn: ask
+                # First turn: ask, waiting for our playout to finish so the
+                # turn timing is clean.
                 logger.info("=== speak: ask ===")
-                await send_command(
-                    "speak", text="Hi Ember! Can you tell me about this book in one short sentence?"
+                spoke = await send_command(
+                    "speak",
+                    text="Hi Ember! Can you tell me about this book in one short sentence?",
+                    wait=True,
+                    deadline=150.0,
                 )
-                await asyncio.sleep(1)
+                logger.info(f"our playout: {spoke}")
 
                 logger.info("=== listen (turn 1) ===")
-                r1 = await send_command("listen", timeout=45.0)
-                logger.info(f"ember (turn 1): {r1.get('text', '')!r}")
+                t1, cursor = await listen_for_transcript(send_command, 45.0, cursor)
+                logger.info(f"ember (turn 1): {t1!r}")
                 await dump_shim()
 
                 # Second turn
                 logger.info("=== speak: follow-up ===")
-                await send_command("speak", text="Who is the main character?")
-                await asyncio.sleep(1)
-                r2 = await send_command("listen", timeout=30.0)
-                logger.info(f"ember (turn 2): {r2.get('text', '')!r}")
+                await send_command("speak", text="Who is the main character?", deadline=60.0)
+                t2, cursor = await listen_for_transcript(send_command, 30.0, cursor)
+                logger.info(f"ember (turn 2): {t2!r}")
                 await dump_shim()
+
+                # Dump the full event log (cursor=0 replays the session) and
+                # derive the per-turn response gaps from it.
+                import json
+
+                full_log = await send_command("listen", timeout=1.0, cursor=0, deadline=30.0)
+                events_path = os.path.join(artifacts_dir, "events.json")
+                with open(events_path, "w") as f:
+                    json.dump(full_log["events"], f, indent=2)
+                logger.info(
+                    f"event log: {len(full_log['events'])} events -> {events_path} "
+                    f"({[e['type'] for e in full_log['events']]})"
+                )
+                report_response_gaps(full_log["events"])
 
                 # End call by clicking red cross (or End reading button as fallback).
                 await shot("05_before_end_call")

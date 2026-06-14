@@ -79,6 +79,7 @@ async def start_browser_session(
     cdp_port: int = 9222,
     audio_port: int = 9091,
     user_data_dir: str | None = None,
+    record_dir: str | None = None,
 ) -> dict:
     """Launch a Playwright-controlled Chromium with the browser audio shim injected.
 
@@ -117,6 +118,9 @@ async def start_browser_session(
         audio_port: Local port the WebSocket audio transport listens on.
         user_data_dir: Persistent Chrome profile dir to reuse an authenticated
             session across runs.
+        record_dir: If set, ``stop()`` writes ``kokoro_voice.wav`` (the tester),
+            ``ember_voice.wav`` (the app bot) and ``merged.wav`` (both mixed)
+            into this directory, so the whole conversation can be played back.
 
     Returns:
         ``{cdp_endpoint, audio_ws_url, playwright_mcp_env, attach_hint}``.
@@ -125,7 +129,9 @@ async def start_browser_session(
     _assert_port_free(audio_port, "audio_port")
     _assert_port_free(cdp_port, "cdp_port")
     audio_ws_url = f"ws://localhost:{audio_port}"
-    start_pipecat_process(BrowserShimRunnerArguments(host="localhost", port=audio_port))
+    start_pipecat_process(
+        BrowserShimRunnerArguments(host="localhost", port=audio_port, record_dir=record_dir)
+    )
     try:
         info = await asyncio.to_thread(
             start_browser,
@@ -142,38 +148,67 @@ async def start_browser_session(
 
 
 @mcp.tool()
-async def listen(timeout: float = 30.0) -> str:
-    """Listen for the next utterance and return the transcribed text.
+async def listen(timeout: float = 30.0, cursor: int = 0) -> dict:
+    """Stream timestamped conversation events from the voice session.
 
-    Blocks until the other party finishes an utterance (VAD-segmented).
-    A long reply produces multiple utterances — call listen() in a loop
-    to keep the conversation flowing.
+    Blocks until at least one event exists past ``cursor`` (or ``timeout``
+    elapses), then returns every event from ``cursor`` onward plus the next
+    cursor. Pass the returned ``cursor`` to the next call to resume without
+    missing or re-reading anything; ``cursor=0`` replays the whole session.
+
+    Two parties: ``app_bot`` is the app's voice agent under test; ``tester``
+    is our synthetic human (Kokoro TTS). Event types (each has ``"t"``,
+    wall-clock seconds):
+      * ``session_started`` — log header; carries ``vad_stop_secs``.
+      * ``session_stopped`` — the session is tearing down (``stop()`` was
+        called); a pending ``listen()`` returns this instead of being cancelled.
+      * ``client_connected`` / ``client_disconnected`` — the in-page audio
+        link came up / dropped (a drop is a status event, NOT speech).
+      * ``app_bot_speech_started`` / ``app_bot_speech_stopped`` — the app
+        bot's voice activity. NOTE: ``app_bot_speech_stopped.t`` lands about
+        ``vad_stop_secs`` (~1 s) after it truly stopped talking.
+      * ``app_bot_transcript`` — a finished app-bot utterance: ``text`` plus
+        ``turn_started_at`` (ISO timestamp of the turn start). Arrives after
+        the corresponding ``app_bot_speech_stopped`` (batch STT).
+      * ``tester_speech_started`` / ``tester_speech_stopped`` /
+        ``tester_speech_interrupted`` — OUR synthetic voice starting /
+        finishing / being cut off at playout.
+      * ``tester_transcript`` — the exact text WE spoke (``text``); the
+        ground-truth ``speak()`` input, emitted at speak time (not via STT).
+
+    To simply wait for the next thing the app bot says: call in a loop with
+    the advancing cursor and act on ``app_bot_transcript`` events.
 
     Args:
-        timeout: Max seconds to wait. Returns "" on timeout.
+        timeout: Max seconds to wait for a new event past ``cursor``.
+        cursor: Event-log position from the previous call (0 = from start).
 
     Returns:
-        The transcribed utterance, "" on timeout, or the literal marker
-        "[voicebox event] audio client disconnected" if the in-page audio
-        connection dropped (this is a status event, NOT bot speech).
+        ``{"events": [...], "cursor": <next cursor>}`` — ``events`` is empty
+        if the timeout elapsed with nothing new.
 
     """
-    # Parent-side deadline: child enforces `timeout` on the utterance wait,
-    # the margin covers transcription of a long final utterance.
-    result = await send_command("listen", timeout=timeout, deadline=timeout + 30.0)
-    if result.get("event") == "client_disconnected":
-        return "[voicebox event] audio client disconnected"
-    return result.get("text", "")
+    # Parent-side deadline: the child enforces `timeout` on the event wait,
+    # the margin covers IPC latency and a long transcription flush.
+    return await send_command("listen", timeout=timeout, cursor=cursor, deadline=timeout + 30.0)
 
 
 @mcp.tool()
-async def speak(text: str) -> bool:
-    """Speak the given text to the user using text-to-speech.
+async def speak(text: str, wait: bool = False) -> dict:
+    """Speak the given text into the page's microphone via text-to-speech.
 
-    Returns true if the agent spoke the text, false otherwise.
+    Args:
+        text: The text to speak.
+        wait: When false (default), returns as soon as the speech is queued.
+            When true, returns only after our audio finished playing out,
+            with ``started_at`` / ``finished_at`` wall-clock seconds and an
+            ``interrupted`` flag — useful for timing-sensitive scripts.
+
+    Returns:
+        ``{"queued": True}``, plus the playout timing fields when ``wait``.
+
     """
-    await send_command("speak", text=text, deadline=60.0)
-    return True
+    return await send_command("speak", text=text, wait=wait, deadline=150.0 if wait else 60.0)
 
 
 @mcp.tool()

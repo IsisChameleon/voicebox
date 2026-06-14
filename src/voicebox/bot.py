@@ -21,7 +21,7 @@ import asyncio
 from loguru import logger
 from pipecat.runner.types import RunnerArguments
 
-from voicebox.agent import CLIENT_DISCONNECTED, create_agent
+from voicebox.agent import create_agent
 from voicebox.agent_ipc import read_request, send_response
 
 
@@ -29,10 +29,11 @@ async def bot(runner_args: RunnerArguments):
     """Start the Pipecat agent and run the command loop.
 
     Supported commands (all requests/responses carry a correlation ``id``):
-        listen: Wait for an utterance, respond with ``{"text": "..."}``; if the
-            shim's WebSocket dropped instead, respond with
-            ``{"text": "", "event": "client_disconnected"}``.
-        speak:  Speak the provided text, respond with ``{"ok": True}``.
+        listen: Wait for conversation events past ``cursor``, respond with
+            ``{"events": [...], "cursor": <next>}`` (empty events on timeout).
+        speak:  Speak the provided text; with ``wait`` respond after playout
+            with ``{"queued", "started_at", "finished_at", "interrupted"}``,
+            otherwise respond ``{"queued": True}`` immediately.
         stop:   Cancel in-flight commands, stop the agent and exit the loop,
             respond with ``{"ok": True}``.
 
@@ -49,18 +50,12 @@ async def bot(runner_args: RunnerArguments):
         cmd = request.get("cmd")
         try:
             if cmd == "listen":
-                timeout = request.get("timeout", 30.0)
-                try:
-                    text = await asyncio.wait_for(agent.listen(), timeout=timeout)
-                except asyncio.TimeoutError:
-                    text = ""
-                if text == CLIENT_DISCONNECTED:
-                    response = {"text": "", "event": "client_disconnected"}
-                else:
-                    response = {"text": text}
+                response = await agent.listen_events(
+                    timeout=request.get("timeout", 30.0),
+                    cursor=request.get("cursor", 0),
+                )
             elif cmd == "speak":
-                await agent.speak(request["text"])
-                response = {"ok": True}
+                response = await agent.speak(request["text"], wait=request.get("wait", False))
             else:
                 response = {"error": f"Unknown command: {cmd}"}
         except asyncio.CancelledError:
@@ -80,13 +75,18 @@ async def bot(runner_args: RunnerArguments):
         logger.debug(f"Command '{cmd}' received, dispatching...")
 
         if cmd == "stop":
-            # Cancel in-flight commands first (a pending listen would block
-            # forever once the pipeline is gone), then stop and acknowledge.
-            for task in in_flight:
-                task.cancel()
-            await asyncio.gather(*in_flight, return_exceptions=True)
+            # Stop the agent FIRST: it emits SESSION_STOPPED and wakes any
+            # pending listen_events(), so those return cleanly instead of being
+            # cancelled mid-wait. Then drain in-flight briefly (let the woken
+            # listens send their responses) and cancel any stragglers (e.g. a
+            # speak still awaiting playout) before acknowledging.
             try:
                 await agent.stop()
+                if in_flight:
+                    await asyncio.wait(in_flight, timeout=2.0)
+                    for task in in_flight:
+                        task.cancel()
+                    await asyncio.gather(*in_flight, return_exceptions=True)
                 await send_response({"id": request.get("id"), "ok": True})
             except Exception as e:
                 logger.warning(f"Error stopping the agent: {e}")
