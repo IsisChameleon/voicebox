@@ -1,5 +1,8 @@
 import pytest
 
+# Imported as a module (not by name) so pytest doesn't try to collect the
+# event classes whose names start with "Test" (e.g. TesterTranscriptEvent).
+import voicebox.events as ev
 from voicebox.metrics import compute_metrics
 
 # A synthetic conversation with known boundaries. Times in seconds.
@@ -144,6 +147,25 @@ def test_app_speaks_first_has_no_latency():
     m = compute_metrics(events, 1.0)
     assert m["app_response_latencies_secs"] == []
     assert "response_latency_secs" not in m["turns"][0]
+
+
+def test_runs_on_real_serialized_events():
+    # Guard the production contract: compute_metrics consumes VoiceboxEvent
+    # .model_dump() output, where `type` is a plain string (use_enum_values).
+    evs = [
+        ev.SessionStartedEvent(t=0.0, vad_stop_secs=1.0, note="n"),
+        ev.VoiceboxEvent(type=ev.EventType.TESTER_SPEECH_STARTED, t=2.0),
+        ev.VoiceboxEvent(type=ev.EventType.TESTER_SPEECH_STOPPED, t=4.0),
+        ev.TesterTranscriptEvent(t=4.0, text="hello"),
+        ev.VoiceboxEvent(type=ev.EventType.APP_BOT_SPEECH_STARTED, t=5.0),
+        ev.VoiceboxEvent(type=ev.EventType.APP_BOT_SPEECH_STOPPED, t=8.0),
+        ev.TranscriptEvent(t=8.2, text="hi there", turn_started_at="iso"),
+        ev.VoiceboxEvent(type=ev.EventType.SESSION_STOPPED, t=10.0),
+    ]
+    m = compute_metrics([e.model_dump() for e in evs], 1.0)
+    assert m["app_response_latencies_secs"] == [1.0]
+    assert m["utterances"] == {"tester": 1, "app_bot": 1}
+    assert m["turns"][1]["response_latency_secs"] == 1.0
 
 
 def test_talk_over_window_when_tester_overlaps_app():

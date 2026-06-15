@@ -89,13 +89,13 @@ async def bot(runner_args: RunnerArguments):
             # listens send their responses) and cancel any stragglers (e.g. a
             # speak still awaiting playout) before acknowledging.
             try:
-                await agent.stop()
+                artifacts = await agent.stop()
                 if in_flight:
                     await asyncio.wait(in_flight, timeout=2.0)
                     for task in in_flight:
                         task.cancel()
                     await asyncio.gather(*in_flight, return_exceptions=True)
-                await send_response({"id": request.get("id"), "ok": True})
+                await send_response({"id": request.get("id"), "ok": True, "artifacts": artifacts})
             except Exception as e:
                 logger.warning(f"Error stopping the agent: {e}")
                 await send_response({"id": request.get("id"), "error": str(e)})
