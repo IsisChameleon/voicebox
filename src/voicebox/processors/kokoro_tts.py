@@ -21,6 +21,7 @@ from pipecat.frames.frames import (
     TTSStartedFrame,
     TTSStoppedFrame,
 )
+from pipecat.services.settings import TTSSettings
 from pipecat.services.tts_service import TTSService
 from pipecat.transcriptions.language import Language, resolve_language
 from pipecat.utils.tracing.service_decorators import traced_tts
@@ -118,9 +119,15 @@ class KokoroTTSService(TTSService):
             **kwargs: Additional arguments passed to parent `TTSService`.
 
         """
-        super().__init__(**kwargs)
-
         params = params or KokoroTTSService.InputParams()
+
+        # 1.3.0 validates that store-mode settings have no NOT_GIVEN fields:
+        # supply model/voice/language (model=None — Kokoro loads a local file,
+        # it has no model-name concept).
+        super().__init__(
+            settings=TTSSettings(model=None, voice=voice_id, language=params.language),
+            **kwargs,
+        )
 
         self._voice_id = voice_id
         self._lang_code = language_to_kokoro_language(params.language)

@@ -43,8 +43,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineTask
+from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
@@ -65,10 +64,13 @@ from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
     TurnAnalyzerUserTurnStopStrategy,
 )
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
+from pipecat.workers.runner import WorkerRunner
 
 from voicebox.events import (
     EventType,
     SessionStartedEvent,
+    TesterBargeInArmedEvent,
+    TesterBargeInFiredEvent,
     TesterTranscriptEvent,
     TranscriptEvent,
     VoiceboxEvent,
@@ -85,12 +87,12 @@ load_dotenv(override=True)
 # consumers can subtract it.
 VAD_STOP_SECS = 1.0
 
-# Max seconds speak(wait=True) waits for our audio to finish playing out.
+# Max seconds speak(wait_for_playout=True) waits for our audio to finish playing out.
 PLAYOUT_TIMEOUT_SECS = 120.0
 
 # Kokoro's playout reaches the transport in segments separated by sub-second
 # gaps, so pipecat emits a BotStarted/StoppedSpeakingFrame PAIR per segment.
-# speak(wait=True) treats the playout as finished only after the bot has stayed
+# speak(wait_for_playout=True) treats the playout as finished only after the bot has stayed
 # silent this long, so the reported span covers the whole utterance instead of
 # clipping at the first segment.
 PLAYOUT_SETTLE_SECS = 1.0
@@ -131,7 +133,7 @@ class _PipelineEventObserver(BaseObserver):
 
 
 class _Playout:
-    """Tracks one in-flight ``speak(wait=True)`` until its audio plays out.
+    """Tracks one in-flight ``speak(wait_for_playout=True)`` until its audio plays out.
 
     The tester's BotStarted/StoppedSpeakingFrame carry no utterance identity,
     so only one waited speak is tracked at a time (guarded by a lock in
@@ -204,8 +206,8 @@ class PipecatMCPAgent:
         self._audio_buffer = None  # type: ignore[assignment]
 
         self._task: Optional[asyncio.Task] = None
-        self._pipeline_task: Optional[PipelineTask] = None
-        self._pipeline_runner: Optional[PipelineRunner] = None
+        self._pipeline_task: Optional[PipelineWorker] = None
+        self._pipeline_runner: Optional[WorkerRunner] = None
         self._connected = asyncio.Event()
 
         # Monotonic event log; listen_events() blocks on the condition until
@@ -213,9 +215,15 @@ class PipecatMCPAgent:
         self._events: list[VoiceboxEvent] = []
         self._event_cond = asyncio.Condition()
 
-        # In-flight speak(wait=True) playout tracking — one at a time.
+        # In-flight speak(wait_for_playout=True) playout tracking — one at a time.
         self._playout: Optional[_Playout] = None
         self._playout_lock = asyncio.Lock()
+
+        # Whether the app bot is currently speaking, toggled by the VAD frames.
+        # Lets speak(wait_for_turn=True) block until the bot falls silent.
+        self._app_bot_speaking: bool = False
+        # Background tasks armed by speak(when=...); cancelled on stop().
+        self._armed_tasks: set[asyncio.Task] = set()
 
         self._started = False
 
@@ -235,10 +243,12 @@ class PipecatMCPAgent:
         the bot-speaking frames carry none, so those stamp at observation.
         """
         if isinstance(frame, VADUserStartedSpeakingFrame):
+            self._app_bot_speaking = True
             await self._emit(
                 VoiceboxEvent(type=EventType.APP_BOT_SPEECH_STARTED, t=frame.timestamp)
             )
         elif isinstance(frame, VADUserStoppedSpeakingFrame):
+            self._app_bot_speaking = False
             await self._emit(
                 VoiceboxEvent(type=EventType.APP_BOT_SPEECH_STOPPED, t=frame.timestamp)
             )
@@ -321,14 +331,14 @@ class PipecatMCPAgent:
         # enable_rtvi=False: we are a headless synthetic user, not an RTVI
         # client. Conversation events reach Claude via listen_events()'s
         # return value, not via data-channel notifications.
-        self._pipeline_task = PipelineTask(
+        self._pipeline_task = PipelineWorker(
             pipeline,
             cancel_on_idle_timeout=False,
             enable_rtvi=False,
             observers=[_PipelineEventObserver(self)],
         )
 
-        self._pipeline_runner = PipelineRunner(handle_sigterm=True)
+        self._pipeline_runner = WorkerRunner(handle_sigterm=True)
 
         @self._transport.event_handler("on_client_connected")
         async def on_connected(transport, client):
@@ -363,7 +373,11 @@ class PipecatMCPAgent:
             )
         )
 
-        self._task = asyncio.create_task(self._pipeline_runner.run(self._pipeline_task))
+        # 1.3.0: register the worker via add_workers() before run() — passing it
+        # to run() directly is deprecated. run() (auto_end=True) returns when the
+        # worker finishes (our EndFrame in stop()).
+        await self._pipeline_runner.add_workers(self._pipeline_task)
+        self._task = asyncio.create_task(self._pipeline_runner.run())
 
         if self._audio_buffer is not None:
 
@@ -387,6 +401,12 @@ class PipecatMCPAgent:
         # Signal session end FIRST so a pending listen_events() returns this
         # event instead of being cancelled mid-wait when the pipeline tears down.
         await self._emit(VoiceboxEvent(type=EventType.SESSION_STOPPED))
+
+        # Cancel any armed barge-in triggers still waiting for their event or
+        # sleeping on their timer — they must not queue speech after teardown.
+        for task in self._armed_tasks:
+            task.cancel()
+        await asyncio.gather(*self._armed_tasks, return_exceptions=True)
 
         # Flush recordings BEFORE EndFrame propagates — the audio buffer
         # processor is closed after EndFrame.
@@ -474,33 +494,89 @@ class PipecatMCPAgent:
             events = self._events[cursor:]
         return {"events": [e.model_dump() for e in events], "cursor": cursor + len(events)}
 
-    async def speak(self, text: str, wait: bool = False) -> dict:
+    async def speak(
+        self,
+        text: str,
+        wait_for_playout: bool = False,
+        wait_for_turn: bool = False,
+        when: Optional[str] = None,
+        timer_secs: float = 0.0,
+    ) -> dict:
         """Queue an LLM response so TTS speaks ``text`` into the transport.
+
+        Barge-in testing means TIMING our speech relative to the app bot's, then
+        observing the bot's reaction in the event log — we never interrupt the
+        bot directly (it is a black box reached only through its microphone).
+
+        ``wait_for_turn`` and ``when`` gate WHEN we start speaking;
+        ``wait_for_playout`` gates WHEN this call returns (the start gates and
+        the return gate are independent and may be combined).
 
         Args:
             text: The text to speak.
-            wait: When True, resolve only after our audio finished playing
-                out through the transport, and report the playout span.
+            wait_for_playout: When False (default) the call returns as soon as
+                the speech is queued. When True it returns only after OUR OWN
+                audio has finished playing out, reporting the playout span
+                (``started_at`` / ``finished_at`` / ``interrupted``). It says
+                nothing about the app bot — it waits for our Kokoro audio to
+                finish. Ignored when ``when`` is set (the call returns
+                immediately with ``{"armed": True}``).
+            wait_for_turn: When True, block until the app bot is NOT currently
+                speaking, then speak. If already silent, speak immediately. This
+                gates the START of our speech (the polite path).
+            when: An ``EventType`` value. When set, arm a ONE-SHOT trigger:
+                return ``{"armed": True}`` immediately, then in the background
+                wait for the NEXT occurrence of that event, sleep
+                ``timer_secs``, and speak ``text`` (canonical barge-in:
+                ``when="app_bot_speech_started", timer_secs=1.5``).
+            timer_secs: Seconds to sleep after the ``when`` event fires before
+                speaking. Only meaningful with ``when``.
 
         Returns:
-            ``{"queued": True}`` immediately when ``wait`` is False;
-            otherwise ``{"queued": True, "started_at", "finished_at",
-            "interrupted"}`` (wall-clock seconds).
+            ``{"armed": True}`` immediately when ``when`` is set;
+            ``{"queued": True}`` when ``wait_for_playout`` is False; otherwise
+            ``{"queued": True, "started_at", "finished_at", "interrupted"}``
+            (wall-clock seconds).
+
+        Raises:
+            ValueError: If both ``when`` and ``wait_for_turn`` are set, or if
+                ``when`` is not a valid ``EventType`` value.
 
         """
+        if when is not None and wait_for_turn:
+            raise ValueError("speak: 'when' and 'wait_for_turn' are mutually exclusive")
+        if when is not None and when not in {e.value for e in EventType}:
+            valid = ", ".join(sorted(e.value for e in EventType))
+            raise ValueError(f"speak: unknown event type 'when={when}'; valid values: {valid}")
+
         if not self._started:
             await self.start()
 
         if not self._pipeline_task:
             raise RuntimeError("Pipecat MCP Agent not initialized")
 
+        if when is not None:
+            # Snapshot the log position synchronously HERE, before spawning the
+            # task: the trigger must react only to events arriving after arming,
+            # and capturing it inside the task would race the task's own
+            # scheduling against the triggering event (and could drop it).
+            start = len(self._events)
+            await self._emit(TesterBargeInArmedEvent(when=when, timer_secs=timer_secs, text=text))
+            task = asyncio.create_task(self._armed_speak(text, when, timer_secs, start))
+            self._armed_tasks.add(task)
+            task.add_done_callback(self._armed_tasks.discard)
+            return {"armed": True}
+
         await self._connected.wait()
+
+        if wait_for_turn:
+            await self._wait_for_app_bot_silent()
 
         # Log what we said (ground-truth input, not STT) so the event stream is
         # a complete two-sided transcript.
         await self._emit(TesterTranscriptEvent(text=text))
 
-        if not wait:
+        if not wait_for_playout:
             await self._queue_speak_frames(text)
             return {"queued": True}
 
@@ -516,6 +592,33 @@ class PipecatMCPAgent:
                 self._playout = None
         return {"queued": True, **result}
 
+    async def _wait_for_app_bot_silent(self):
+        """Block until the app bot is not currently speaking."""
+        async with self._event_cond:
+            await self._event_cond.wait_for(lambda: not self._app_bot_speaking)
+
+    async def _armed_speak(self, text: str, when: str, timer_secs: float, start: int):
+        """Background trigger: wait for the next ``when`` event, then speak.
+
+        ``start`` is the event-log length captured at arm time (in ``speak()``),
+        so only events that arrive AFTER arming can trigger. Sleeps
+        ``timer_secs``, then queues ``text``. Cancellation from ``stop()``
+        propagates out cleanly — the ``async with`` releases the lock.
+        """
+        async with self._event_cond:
+            await self._event_cond.wait_for(
+                lambda: any(e.type == when for e in self._events[start:])
+            )
+            # e.type is a STRING (use_enum_values=True); ``when`` is that string.
+            triggered = next(e for e in self._events[start:] if e.type == when)
+
+        await asyncio.sleep(timer_secs)
+        await self._connected.wait()
+
+        await self._emit(TesterBargeInFiredEvent(when=when, triggered_by_t=triggered.t))
+        await self._emit(TesterTranscriptEvent(text=text))
+        await self._queue_speak_frames(text)
+
     async def _queue_speak_frames(self, text: str):
         """Push the LLM-response frame triplet that drives TTS."""
         if not self._pipeline_task:
@@ -530,8 +633,12 @@ class PipecatMCPAgent:
 
     def _create_stt_service(self) -> STTService:
         if sys.platform == "darwin":
-            return WhisperSTTServiceMLX(model="mlx-community/whisper-large-v3-turbo")
-        return WhisperSTTService(model="Systran/faster-distil-whisper-large-v3")
+            return WhisperSTTServiceMLX(
+                settings=WhisperSTTServiceMLX.Settings(model="mlx-community/whisper-large-v3-turbo")
+            )
+        return WhisperSTTService(
+            settings=WhisperSTTService.Settings(model="Systran/faster-distil-whisper-large-v3")
+        )
 
     def _create_tts_service(self) -> TTSService:
         return KokoroTTSService(voice_id="af_heart")

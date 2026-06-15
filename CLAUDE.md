@@ -52,8 +52,8 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
 ## MCP tools (`server.py`)
 
 - `start_browser_session(url, headless=False, cdp_port=9222, audio_port=9091)` → `{cdp_endpoint, audio_ws_url}`
-- `speak(text, wait=False)` → `{queued: true}` when queued; with `wait=True` resolves after playout with `{started_at, finished_at, interrupted}`
-- `listen(timeout=30, cursor=0)` → `{events: [...], cursor}` — timestamped conversation events (`session_started`, `client_connected/disconnected`, `app_bot_speech_started/stopped`, `app_bot_transcript`, `tester_speech_started/stopped/interrupted`); pass the returned cursor back to resume; empty `events` on timeout. Two parties: **app_bot** = the app's voice agent under test, **tester** = our synthetic user. Event vocabulary lives in `events.py`.
+- `speak(text, wait_for_playout=False, wait_for_turn=False, when=None, timer_secs=0.0)` → `{queued: true}` when queued. `wait_for_playout=True` returns only after OUR OWN audio finishes playing, adding `{started_at, finished_at, interrupted}` (it waits for our Kokoro audio — NOT the app bot). `wait_for_turn=True` waits until the app bot is silent, then speaks (the polite path). `when=<event>, timer_secs=N` arms a one-shot barge-in: returns `{armed: true}` immediately, then N s after the next `when` event (e.g. `"app_bot_speech_started"`) speaks over the bot. `wait_for_turn`/`when` gate WHEN we start; `wait_for_playout` gates WHEN the call returns.
+- `listen(timeout=30, cursor=0)` → `{events: [...], cursor}` — timestamped conversation events (`session_started`, `session_stopped`, `client_connected/disconnected`, `app_bot_speech_started/stopped`, `app_bot_transcript`, `tester_speech_started/stopped/interrupted`, `tester_transcript`, `tester_barge_in_armed/fired`); pass the returned cursor back to resume; empty `events` on timeout. Two parties: **app_bot** = the app's voice agent under test, **tester** = our synthetic user. Event vocabulary lives in `events.py`.
 - `stop()` → tears down pipecat child + browser child
 
 ## Non-obvious facts & traps (verified, don't re-derive)
@@ -160,3 +160,7 @@ real browser (and, for e2e, a running voice app on `localhost:3000`).
 - License header (BSD-2-Clause, "Copyright (c) 2026, Daily") at the top of every `.py` — copy the
   existing block when adding files.
 - Single session at a time: ports 9090/9091/9222 are pinned unless overridden via tool args.
+- **All run artifacts go under `temp/` (gitignored, never committed).** Point `record_dir` at
+  `temp/<run-name>` for any dogfood/manual run (e.g. `temp/dogfood`), and the `scripts/` drivers
+  write there too (`temp/e2e_readme_call`). Treat it as a scratch dir: WAVs, PNGs, `events.json`,
+  run logs.
