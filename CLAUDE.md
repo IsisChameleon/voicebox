@@ -160,3 +160,7 @@ real browser (and, for e2e, a running voice app on `localhost:3000`).
 - License header (BSD-2-Clause, "Copyright (c) 2026, Daily") at the top of every `.py` — copy the
   existing block when adding files.
 - Single session at a time: ports 9090/9091/9222 are pinned unless overridden via tool args.
+- **All run artifacts go under `temp/` (gitignored, never committed).** Point `record_dir` at
+  `temp/<run-name>` for any dogfood/manual run (e.g. `temp/dogfood`), and the `scripts/` drivers
+  write there too (`temp/e2e_readme_call`). Treat it as a scratch dir: WAVs, PNGs, `events.json`,
+  run logs.

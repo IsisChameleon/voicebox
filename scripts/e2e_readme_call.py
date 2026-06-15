@@ -21,9 +21,9 @@ from loguru import logger
 
 logger.remove()
 logger.add(sys.stderr, level="INFO")
-# Also tee to an artifacts log so we have a clean transcript artifact.
+# Also tee to a log under temp/ so we have a clean transcript artifact.
 _LOG_PATH = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "artifacts", "e2e_readme_call", "run.log")
+    os.path.join(os.path.dirname(__file__), "..", "temp", "e2e_readme_call", "run.log")
 )
 os.makedirs(os.path.dirname(_LOG_PATH), exist_ok=True)
 logger.add(_LOG_PATH, level="INFO", mode="w")
@@ -201,7 +201,7 @@ async def main():
     audio_ws_url = f"ws://localhost:{audio_port}"
 
     artifacts_dir = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "artifacts", "e2e_readme_call")
+        os.path.join(os.path.dirname(__file__), "..", "temp", "e2e_readme_call")
     )
     os.makedirs(artifacts_dir, exist_ok=True)
     logger.info(f"artifacts dir: {artifacts_dir}")

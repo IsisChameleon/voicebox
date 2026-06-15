@@ -44,8 +44,6 @@ whisker_setup.py
 # playwright-cli working dir (snapshots + console logs)
 .playwright-cli/
 
-# E2E test artifacts (committed selectively below)
-artifacts/**/*.png
-artifacts/**/*.wav
-artifacts/**/*.log
-artifacts/**/*.json
+# Scratch dir for all run artifacts: dogfood + e2e recordings (WAVs, PNGs,
+# events.json, run logs). Everything here is throwaway — never committed.
+temp/
