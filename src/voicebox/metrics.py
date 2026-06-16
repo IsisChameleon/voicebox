@@ -27,14 +27,8 @@ def compute_metrics(events: list[dict], vad_stop_secs: float) -> dict:
     close_at = _close_at(events)
     app_intervals = _intervals(events, "app_bot_speech_started", "app_bot_speech_stopped", close_at)
     tester_intervals = _tester_intervals(events, close_at)
-    tester_stops = [stop for _start, stop in tester_intervals]
 
-    # Latency per app interval (None when the app spoke first / no preceding
-    # tester turn); the array drops the Nones.
-    app_latencies: list[float | None] = []
-    for start, _stop in app_intervals:
-        preceding = [t for t in tester_stops if t < start]
-        app_latencies.append(round(start - max(preceding), 3) if preceding else None)
+    app_latencies = _app_response_latencies(events, app_intervals)
     latencies = [latency for latency in app_latencies if latency is not None]
 
     talk_over = _overlaps(tester_intervals, app_intervals)
@@ -100,6 +94,30 @@ def _intervals(
     if open_start is not None and close_at is not None and close_at > open_start:
         intervals.append((open_start, close_at))
     return intervals
+
+
+def _app_response_latencies(
+    events: list[dict], app_intervals: list[tuple[float, float]]
+) -> list[float | None]:
+    """Response latency per app interval, aligned to ``app_intervals``.
+
+    A latency is the reply onset: the gap from a tester utterance's end to the
+    NEXT app-bot speech start. Only the first app start after each tester stop
+    counts — later app intervals are the bot reading/talking on (continuation)
+    and get ``None``. The timer is (re)armed on every ``tester_speech_stopped``
+    /``_interrupted``: if the tester stops again before the bot speaks, the
+    latest stop wins; once the bot speaks it disarms until the tester stops
+    again.
+    """
+    by_start: dict[float, float] = {}
+    pending_tester_stop: float | None = None
+    for e in events:
+        if e["type"] in ("tester_speech_stopped", "tester_speech_interrupted"):
+            pending_tester_stop = e["t"]
+        elif e["type"] == "app_bot_speech_started" and pending_tester_stop is not None:
+            by_start[e["t"]] = round(e["t"] - pending_tester_stop, 3)
+            pending_tester_stop = None
+    return [by_start.get(start) for start, _stop in app_intervals]
 
 
 def _tester_intervals(events: list[dict], close_at: float | None) -> list[tuple[float, float]]:

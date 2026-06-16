@@ -98,11 +98,18 @@ An interval still open at teardown closes at `session_stopped.t`.
 
 Metrics:
 
-- **App response latency (user-perceived)** — per app-bot turn:
-  `app_response_latency_secs = app_bot_speech_started.t − (preceding tester_speech_stopped.t)`.
+- **App response latency (user-perceived)** — the **reply onset**:
+  `app_response_latency_secs = (first app_bot_speech_started after a tester turn).t − tester_speech_stopped.t`.
   This is the **silence the synthetic user experiences** between finishing their utterance and
-  hearing the app reply — the headline voice-UX number. Composition matters and must be documented
-  so nobody misreads it as a server-compute time:
+  hearing the app reply — the headline voice-UX number. It attaches to **only the first** app-bot
+  speech start after each tester utterance; every app interval after that, until the tester speaks
+  again, is the bot reading/talking on (continuation) and gets **no** latency. The timer is
+  (re)armed on each `tester_speech_stopped`/`_interrupted`: if the tester stops again before the bot
+  speaks, the latest stop wins; once the bot speaks it disarms until the next tester stop. (Without
+  this, a bot that reads aloud in many segments would stamp a growing latency on every segment
+  against one stale tester stop — e.g. a real run produced `[9.31, 59.93, 117.521, 117.582, 4.468]`
+  where only `9.31` and `4.468` were real replies; the fix yields `[9.31, 4.468]`.)
+  Composition matters and must be documented so nobody misreads it as a server-compute time:
     - `tester_speech_stopped.t` is **playout-derived** (our `BotStoppedSpeakingFrame`) — the moment
       our Kokoro audio finished playing into the app's mic. Accurate; we control it.
     - `app_bot_speech_started.t` is the **VAD-detected onset** of the app's incoming audio. VAD

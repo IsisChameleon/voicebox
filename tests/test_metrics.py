@@ -56,6 +56,49 @@ def test_app_response_latencies(metrics):
     assert metrics["summary"]["max_app_response_latency_secs"] == 4.0
 
 
+def test_latency_only_for_first_app_turn_after_tester():
+    # One tester utterance, then the app keeps talking in 3 segments (reading
+    # on). Only the FIRST app start is the reply; the continuation segments get
+    # no latency (else they'd grow against the stale tester stop).
+    events = [
+        {"type": "session_started", "t": 0.0, "vad_stop_secs": 1.0, "note": "n"},
+        {"type": "tester_speech_started", "t": 2.0},
+        {"type": "tester_speech_stopped", "t": 4.0},  # arm @4
+        {"type": "app_bot_speech_started", "t": 5.0},  # reply: 1.0
+        {"type": "app_bot_speech_stopped", "t": 9.0},
+        {"type": "app_bot_speech_started", "t": 12.0},  # continuation: none
+        {"type": "app_bot_speech_stopped", "t": 20.0},
+        {"type": "app_bot_speech_started", "t": 25.0},  # continuation: none
+        {"type": "app_bot_speech_stopped", "t": 30.0},
+        {"type": "session_stopped", "t": 31.0},
+    ]
+    m = compute_metrics(events, 1.0)
+    assert m["app_response_latencies_secs"] == [1.0]
+    # only the first app turn carries the latency
+    app_turns = [t for t in m["turns"] if t["speaker"] == "app_bot"]
+    # (no transcripts here, so just assert the latency array is right)
+    assert app_turns == []
+
+
+def test_latency_rearms_on_repeated_tester_stop():
+    # Tester stops twice before the app speaks -> measure from the LATEST stop;
+    # then a continuation app segment gets no latency.
+    events = [
+        {"type": "session_started", "t": 0.0, "vad_stop_secs": 1.0, "note": "n"},
+        {"type": "tester_speech_started", "t": 2.0},
+        {"type": "tester_speech_stopped", "t": 4.0},  # arm @4
+        {"type": "tester_speech_started", "t": 5.0},
+        {"type": "tester_speech_stopped", "t": 7.0},  # re-arm @7 (app stayed silent)
+        {"type": "app_bot_speech_started", "t": 9.0},  # reply: 9-7 = 2.0
+        {"type": "app_bot_speech_stopped", "t": 12.0},
+        {"type": "app_bot_speech_started", "t": 15.0},  # continuation: none
+        {"type": "app_bot_speech_stopped", "t": 20.0},
+        {"type": "session_stopped", "t": 21.0},
+    ]
+    m = compute_metrics(events, 1.0)
+    assert m["app_response_latencies_secs"] == [2.0]
+
+
 def test_no_talk_over_in_clean_conversation(metrics):
     assert metrics["talk_over_windows"] == []
     assert metrics["summary"]["total_talk_over_secs"] == 0.0
