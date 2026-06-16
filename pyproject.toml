@@ -40,6 +40,7 @@ dev = [
     "build~=1.2.2",
     "pip-tools~=7.4.1",
     "pyright>=1.1.404,<1.2",
+    "pytest>=8,<9",
     "ruff>=0.12.11,<1",
     "setuptools~=78.1.1",
     "setuptools_scm~=8.3.1",
@@ -71,3 +72,8 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Skip D104 (missing docstring in public package) for __init__.py files
 "**/__init__.py" = ["D104"]
+# Tests don't need module/function docstrings.
+"tests/**" = ["D100", "D103"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -307,16 +307,12 @@ async def main():
                 logger.info(f"ember (turn 2): {t2!r}")
                 await dump_shim()
 
-                # Dump the full event log (cursor=0 replays the session) and
-                # derive the per-turn response gaps from it.
-                import json
-
+                # Read the full event log (cursor=0 replays the session) for the
+                # in-script gap report. The session itself writes events.json +
+                # metrics.json into record_dir at stop().
                 full_log = await send_command("listen", timeout=1.0, cursor=0, deadline=30.0)
-                events_path = os.path.join(artifacts_dir, "events.json")
-                with open(events_path, "w") as f:
-                    json.dump(full_log["events"], f, indent=2)
                 logger.info(
-                    f"event log: {len(full_log['events'])} events -> {events_path} "
+                    f"event log: {len(full_log['events'])} events "
                     f"({[e['type'] for e in full_log['events']]})"
                 )
                 report_response_gaps(full_log["events"])

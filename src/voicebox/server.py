@@ -118,9 +118,16 @@ async def start_browser_session(
         audio_port: Local port the WebSocket audio transport listens on.
         user_data_dir: Persistent Chrome profile dir to reuse an authenticated
             session across runs.
-        record_dir: If set, ``stop()`` writes ``kokoro_voice.wav`` (the tester),
-            ``ember_voice.wav`` (the app bot) and ``merged.wav`` (both mixed)
-            into this directory, so the whole conversation can be played back.
+        record_dir: If set, ``stop()`` writes a reviewable test report into this
+            directory and returns the paths:
+              * ``kokoro_voice.wav`` — mono, the tester's (our) voice.
+              * ``ember_voice.wav`` — mono, the app bot's voice.
+              * ``merged.wav`` — stereo, tester on the left, app bot on the right.
+              * ``events.json`` — the full conversation event log (same objects
+                ``listen()`` returns).
+              * ``metrics.json`` — the computed report (per-turn response
+                latency, talk-over windows, dead-air gaps, talk ratio,
+                transcripts; see ``stop()`` for the schema).
 
     Returns:
         ``{cdp_endpoint, audio_ws_url, playwright_mcp_env, attach_hint}``.
@@ -253,17 +260,32 @@ async def speak(
 
 
 @mcp.tool()
-async def stop() -> bool:
+async def stop() -> dict:
     """Stop the voice pipeline and clean up resources.
 
     Call this when the voice conversation is complete to gracefully shut
     down the voice agent. Also closes the Playwright-controlled browser
     if one is active (started via ``start_browser_session``).
 
-    Returns true if the agent was stopped successfully, false otherwise.
+    Returns:
+        ``{"stopped": true}``. When the session ran with ``record_dir``, also
+        ``"artifacts"`` with the absolute paths written for review:
+
+          * ``events`` — ``events.json``, the full conversation event log.
+          * ``metrics`` — ``metrics.json``, the computed test report. Top-level
+            keys: ``session`` (span + ``biases`` to read the numbers correctly),
+            ``turns`` (transcript per turn; app-bot turns carry
+            ``response_latency_secs``), ``app_response_latencies_secs``,
+            ``talk_over_windows``, ``dead_air_gaps``, ``talk_time``,
+            ``utterances``, ``summary``.
+          * ``merged_wav`` / ``tester_wav`` / ``app_bot_wav`` — recordings, if
+            audio was captured.
+
     """
+    artifacts = None
     try:
-        await send_command("stop", deadline=30.0)
+        response = await send_command("stop", deadline=30.0)
+        artifacts = response.get("artifacts")
     except Exception as e:
         # A hung/dead child still gets reaped below — that's a stop too.
         logger.warning(f"graceful stop failed ({e}); forcing child shutdown")
@@ -275,7 +297,10 @@ async def stop() -> bool:
             await asyncio.to_thread(stop_browser)
         except Exception as e:
             logger.warning(f"stop_browser failed: {e}")
-    return True
+    result: dict = {"stopped": True}
+    if artifacts:
+        result["artifacts"] = artifacts
+    return result
 
 
 def main():

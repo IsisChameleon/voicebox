@@ -75,6 +75,7 @@ from voicebox.events import (
     TranscriptEvent,
     VoiceboxEvent,
 )
+from voicebox.metrics import compute_metrics
 from voicebox.processors.kokoro_tts import KokoroTTSService
 from voicebox.raw_pcm_serializer import RawPCMSerializer
 from voicebox.runner_args import BrowserShimRunnerArguments
@@ -198,7 +199,9 @@ class PipecatMCPAgent:
         Args:
             transport: Pipecat transport (WebSocket server for the browser shim).
             record_dir: If set, audio is buffered via ``AudioBufferProcessor``
-                and ``stop()`` writes user/bot/merged WAVs into this directory.
+                and ``stop()`` writes the per-speaker + stereo WAVs, the
+                ``events.json`` log and the ``metrics.json`` report into this
+                directory, returning their absolute paths.
 
         """
         self._transport = transport
@@ -308,7 +311,7 @@ class PipecatMCPAgent:
 
             self._audio_buffer = AudioBufferProcessor(
                 sample_rate=48000,
-                num_channels=1,
+                num_channels=2,  # stereo merge: tester left, app bot right
                 buffer_size=0,  # accumulate everything
             )
 
@@ -391,10 +394,17 @@ class PipecatMCPAgent:
         self._started = True
         logger.info("Pipecat MCP Agent started!")
 
-    async def stop(self):
-        """Flush recordings, send ``EndFrame``, await the runner."""
+    async def stop(self) -> Optional[dict]:
+        """Flush artifacts, send ``EndFrame``, await the runner.
+
+        Returns:
+            A dict of absolute artifact paths when ``record_dir`` is set
+            (``{events, metrics, merged_wav, tester_wav, app_bot_wav}``), else
+            ``None``. ``*_wav`` keys are present only when audio was recorded.
+
+        """
         if not self._started:
-            return
+            return None
 
         logger.info("Stopping Pipecat MCP agent...")
 
@@ -408,13 +418,14 @@ class PipecatMCPAgent:
             task.cancel()
         await asyncio.gather(*self._armed_tasks, return_exceptions=True)
 
-        # Flush recordings BEFORE EndFrame propagates — the audio buffer
+        # Flush artifacts BEFORE EndFrame propagates — the audio buffer
         # processor is closed after EndFrame.
-        if self._audio_buffer is not None and self._record_dir:
+        artifacts = None
+        if self._record_dir:
             try:
-                await self._dump_recordings()
+                artifacts = await self._dump_artifacts(self._record_dir)
             except Exception as e:
-                logger.warning(f"recording dump failed: {e}")
+                logger.warning(f"artifact dump failed: {e}")
 
         if self._pipeline_task:
             await self._pipeline_task.queue_frame(EndFrame())
@@ -424,45 +435,76 @@ class PipecatMCPAgent:
 
         self._started = False
         logger.info("Pipecat MCP Agent stopped")
+        return artifacts
 
-    async def _dump_recordings(self):
-        """Write captured audio to WAVs in ``self._record_dir``.
+    async def _dump_artifacts(self, record_dir: str) -> dict:
+        """Write the per-session artifacts into ``record_dir``.
 
-        AudioBufferProcessor's two buffers map to:
-          * ``_user_audio_buffer`` — input from the transport, i.e. the BOT's
-            voice arriving via the shim's WebRTC tap.
-          * ``_bot_audio_buffer`` — output from the pipeline, i.e. our Kokoro
-            TTS that the shim feeds into the synthetic mic.
+        Always writes ``events.json`` (the event log) and ``metrics.json`` (the
+        computed test report). When audio was recorded, also writes the
+        per-speaker mono WAVs and a stereo ``merged.wav`` (tester left, app bot
+        right). AudioBufferProcessor's two buffers are inverted vs. voicebox
+        semantics:
+          * ``_user_audio_buffer`` — transport INPUT, i.e. the APP BOT's voice
+            (ember) arriving via the shim's WebRTC tap.
+          * ``_bot_audio_buffer`` — pipeline OUTPUT, i.e. our Kokoro TTS (the
+            tester) fed into the synthetic mic.
+
+        Returns:
+            Absolute paths of the written artifacts.
+
         """
+        import json
         import os
         import wave
 
-        os.makedirs(self._record_dir, exist_ok=True)
-        sr = self._audio_buffer.sample_rate
+        from pipecat.audio.utils import interleave_stereo_audio
 
-        # IMPORTANT: snapshot the buffers BEFORE stop_recording() — the
-        # processor's stop_recording() internally calls _reset_recording()
-        # which clears both buffers.
-        bot_audio = bytes(self._audio_buffer._user_audio_buffer)
-        kokoro_audio = bytes(self._audio_buffer._bot_audio_buffer)
-        merged = self._audio_buffer.merge_audio_buffers()
+        os.makedirs(record_dir, exist_ok=True)
 
-        await self._audio_buffer.stop_recording()
+        def path(name: str) -> str:
+            return os.path.abspath(os.path.join(record_dir, name))
 
-        def write_wav(path: str, audio_bytes: bytes):
-            with wave.open(path, "wb") as w:
-                w.setnchannels(1)
-                w.setsampwidth(2)
-                w.setframerate(sr)
-                w.writeframes(audio_bytes)
+        artifacts: dict = {}
 
-        write_wav(os.path.join(self._record_dir, "ember_voice.wav"), bot_audio)
-        write_wav(os.path.join(self._record_dir, "kokoro_voice.wav"), kokoro_audio)
-        write_wav(os.path.join(self._record_dir, "merged.wav"), merged)
-        logger.info(
-            f"wrote recordings to {self._record_dir} "
-            f"(ember: {len(bot_audio)} B, kokoro: {len(kokoro_audio)} B, merged: {len(merged)} B)"
-        )
+        events = [e.model_dump() for e in self._events]
+        events_path = path("events.json")
+        with open(events_path, "w") as f:
+            json.dump(events, f, indent=2)
+        artifacts["events"] = events_path
+
+        metrics_path = path("metrics.json")
+        with open(metrics_path, "w") as f:
+            json.dump(compute_metrics(events, VAD_STOP_SECS), f, indent=2)
+        artifacts["metrics"] = metrics_path
+
+        buffer = self._audio_buffer
+        if buffer is not None:
+            sr = buffer.sample_rate
+            # Snapshot BEFORE stop_recording() — it calls _reset_recording()
+            # which clears both buffers.
+            app_bot_audio = bytes(buffer._user_audio_buffer)
+            tester_audio = bytes(buffer._bot_audio_buffer)
+            # Tester on the left, app bot on the right (the library's own merge
+            # would invert this, so interleave explicitly).
+            merged = interleave_stereo_audio(tester_audio, app_bot_audio)
+            await buffer.stop_recording()
+
+            def write_wav(name: str, audio_bytes: bytes, channels: int) -> str:
+                p = path(name)
+                with wave.open(p, "wb") as w:
+                    w.setnchannels(channels)
+                    w.setsampwidth(2)
+                    w.setframerate(sr)
+                    w.writeframes(audio_bytes)
+                return p
+
+            artifacts["app_bot_wav"] = write_wav("ember_voice.wav", app_bot_audio, 1)
+            artifacts["tester_wav"] = write_wav("kokoro_voice.wav", tester_audio, 1)
+            artifacts["merged_wav"] = write_wav("merged.wav", merged, 2)
+
+        logger.info(f"wrote artifacts to {self._record_dir}: {sorted(artifacts)}")
+        return artifacts
 
     async def listen_events(self, timeout: float, cursor: int = 0) -> dict:
         """Return the events past ``cursor``, blocking until at least one exists.
