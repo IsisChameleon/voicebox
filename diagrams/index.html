@@ -469,7 +469,7 @@
               <div class="fx-t" style="color:var(--danger)">✗ no UI tools by design</div>
               <div class="fx-d" style="color:#f0c4c8">Ships <b style="color:#fff">no</b> navigate / click / snapshot. That's <i>why</i> a second client must attach.</div>
             </div>
-            <div class="diag">returns → <code>cdp_endpoint</code> · <code>audio_ws_url</code></div>
+            <div class="diag">returns → <code>cdp_endpoint</code> · <code>audio_ws_url</code> · <code>attach_hint</code></div>
           </div>
         </foreignObject>
 
@@ -486,7 +486,7 @@
             </div>
             <div class="note">Logs in, navigates, joins the call — on the browser voicebox already launched.</div>
             <div class="fixbox" style="border-color:var(--line); background:rgba(255,255,255,0.02)">
-              <div class="fx-d" style="color:var(--dim)"><span class="strike">playwright-cli</span> ✗ deprecated, ignores cdp · &nbsp;<code style="color:var(--cyan)">connect_over_cdp</code> ✓ also works</div>
+              <div class="fx-d" style="color:var(--dim)"><code style="color:var(--cyan)">playwright-cli</code> ✓ with <code>PLAYWRIGHT_MCP_CDP_ENDPOINT</code> + <code>PLAYWRIGHT_MCP_ISOLATED=false</code> (both required) · <code style="color:var(--cyan)">connect_over_cdp</code> ✓ also works</div>
             </div>
           </div>
         </foreignObject>
@@ -507,11 +507,11 @@
     </div>
 
     <div class="seq">
-      <div class="step"><div class="n">1</div><div class="who">Claude → voicebox</div><div class="act"><code>start_browser_session(url)</code> → launches Chromium + shim, returns <code>{cdp_endpoint, audio_ws_url}</code></div></div>
+      <div class="step"><div class="n">1</div><div class="who">Claude → voicebox</div><div class="act"><code>start_browser_session(url, record_dir?)</code> → launches Chromium + shim, returns <code>{cdp_endpoint, audio_ws_url, attach_hint}</code></div></div>
       <div class="step"><div class="n">2</div><div class="who">Claude → @playwright/mcp</div><div class="act">attach to <code>:9222</code>, then <code>navigate</code> / login / <code>click</code> → join the call</div></div>
-      <div class="step"><div class="n">3</div><div class="who">Claude → voicebox</div><div class="act"><code>speak("…")</code> → Kokoro feeds the fake mic — the bot hears the user</div></div>
-      <div class="step"><div class="n">4</div><div class="who">Claude → voicebox</div><div class="act"><code>listen()</code> → VAD-segmented Whisper transcript of the bot's reply</div></div>
-      <div class="step"><div class="n">5</div><div class="who">Claude → voicebox</div><div class="act"><code>stop()</code> → tears down the pipecat child + the browser child</div></div>
+      <div class="step"><div class="n">3</div><div class="who">Claude → voicebox</div><div class="act"><code>speak(text)</code> → Kokoro feeds the fake mic — the bot hears the user. Timing modes <code>wait_for_turn</code> / <code>when=…, timer_secs</code> arm a barge-in</div></div>
+      <div class="step"><div class="n">4</div><div class="who">Claude → voicebox</div><div class="act"><code>listen(cursor)</code> → a window of timestamped <code>{events, cursor}</code> — speech start/stop + transcripts; VAD-segmented Whisper feeds the log</div></div>
+      <div class="step"><div class="n">5</div><div class="who">Claude → voicebox</div><div class="act"><code>stop()</code> → tears down both children; with <code>record_dir</code> writes <code>events.json</code> + <code>metrics.json</code> + stereo WAV</div></div>
     </div>
 
     <div class="notes">

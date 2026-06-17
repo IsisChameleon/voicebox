@@ -1,7 +1,5 @@
 # voicebox
 
-# voicebox
-
 **Give your coding agent a voice and ears so it can test your voice agent for you.**
 
 Testing a browser voice app means *being* the user: open the tab, join the call, talk, listen, try to break it — by hand, every time you touch a prompt. voicebox automates that loop. It's an MCP server that turns Claude into a synthetic voice user: Claude drives a real Chromium, speaks into the page's mic via local Kokoro TTS, and hears the agent's replies back via local Whisper.
@@ -70,12 +68,23 @@ Cursor (`~/.cursor/mcp.json`):
 
 ## MCP tools
 
+Two parties appear throughout: **app_bot** = the app's voice agent under test, **tester** = our synthetic user (Kokoro TTS).
+
 | Tool | Purpose |
 |---|---|
-| `start_browser_session(url, headless?, cdp_port?, audio_port?, user_data_dir?)` | Launch a Playwright Chromium with the audio shim injected, navigate to `url`, expose CDP. The shim hijacks the page's mic (fed by Kokoro) and tees the page's WebRTC remote audio into Whisper. Returns `{cdp_endpoint, audio_ws_url}`. Drive the UI with any Playwright client that can attach over CDP (see below). Pass `user_data_dir` (a persistent Chrome profile) to reuse an authenticated session: log in once and stay logged in on later runs with the same dir. |
-| `speak(text)` | Synthesize `text` with Kokoro TTS and stream it into the shim's synthetic mic. Returns when frames are queued — not when audio has finished playing. |
-| `listen(timeout=30)` | Block until the other side completes an utterance (VAD-segmented). Returns the transcribed text, or `""` on timeout. A long reply produces multiple utterances; call `listen()` in a loop. |
-| `stop()` | Tear down the pipecat agent and close the Chromium session. |
+| `start_browser_session(url, headless?, cdp_port?, audio_port?, user_data_dir?, record_dir?)` | Launch a Playwright Chromium with the audio shim injected, navigate to `url`, expose CDP. The shim hijacks the page's mic (fed by Kokoro) and tees the page's WebRTC remote audio into Whisper. Returns `{cdp_endpoint, audio_ws_url, playwright_mcp_env, attach_hint}` — paste `attach_hint` verbatim to wire up a Playwright client over CDP (see below). Pass `user_data_dir` (a persistent Chrome profile) to reuse an authenticated session: log in once and stay logged in on later runs with the same dir. Pass `record_dir` to have `stop()` write a reviewable test report there (see Artifacts below). |
+| `speak(text, wait_for_playout?, wait_for_turn?, when?, timer_secs?)` | Synthesize `text` with Kokoro TTS and stream it into the shim's synthetic mic. Returns `{queued: true}` once queued. `wait_for_playout=true` returns only after *our* audio finishes, adding `{started_at, finished_at, interrupted}`. `wait_for_turn=true` waits until the app bot is silent, then speaks (the polite path). `when=<event>, timer_secs=N` arms a one-shot barge-in: returns `{armed: true}`, then N s after the next `when` event (e.g. `"app_bot_speech_started"`) speaks over the bot. |
+| `listen(timeout=30, cursor=0)` | Return timestamped conversation events past `cursor` (blocks until ≥1 new event or `timeout`), as `{events, cursor}`. Pass the returned `cursor` back to resume; `cursor=0` replays the whole session. Event types include `session_started/stopped`, `client_connected/disconnected`, `app_bot_speech_started/stopped`, `app_bot_transcript`, `tester_speech_started/stopped/interrupted`, `tester_transcript`. To wait for the bot's next reply, loop on the cursor and act on `app_bot_transcript`. |
+| `stop()` | Tear down the pipecat agent and close the Chromium session. Returns `{stopped: true}`, plus `artifacts` (absolute paths) when the session ran with `record_dir`. |
+
+### Artifacts (the test report)
+
+When `start_browser_session` is given a `record_dir`, `stop()` writes an offline-analyzable report there and returns the paths:
+
+- `events.json` — the full conversation event log (the same objects `listen()` returns).
+- `metrics.json` — the computed report: per-turn `response_latency_secs` (tester speech end → app-bot reply onset), `talk_over_windows`, `dead_air_gaps`, `talk_time` + ratio, `utterances`, merged `turns` transcript, and a `session` header with `biases` (e.g. the VAD `stop_secs` and batch-Whisper notes) so the numbers are read correctly.
+- `merged.wav` — stereo, tester on the left channel, app bot on the right.
+- `kokoro_voice.wav` / `ember_voice.wav` — mono per-speaker recordings (tester / app bot).
 
 ### Example session
 
@@ -99,14 +108,18 @@ Cursor (`~/.cursor/mcp.json`):
 // 3. speak — the page's WebRTC peer sends OUR Kokoro audio to the bot
 {"name": "speak", "arguments": {"text": "Hi Ember! Tell me about this book."}}
 
-// 4. listen — the bot's remote audio track is teed to Whisper via the shim
-{"name": "listen", "arguments": {"timeout": 45}}
-// → "Hello, welcome. I'm so excited to have you..."
+// 4. listen — read the event stream; the bot's remote audio is teed to Whisper
+//    via the shim, surfacing as app_bot_transcript events. Loop on the cursor.
+{"name": "listen", "arguments": {"timeout": 45, "cursor": 0}}
+// → {"events": [{"type": "app_bot_speech_started", "t": ...},
+//               {"type": "app_bot_transcript", "t": ..., "text": "Hello, welcome..."}],
+//    "cursor": 7}
 
 // 5. end the call either by saying "goodbye" (if the bot supports
 //    UserVerballyInitiatedDisconnect), or click the End-call button via
-//    Playwright, then:
+//    Playwright, then stop (returns artifact paths if record_dir was set):
 {"name": "stop", "arguments": {}}
+// → {"stopped": true, "artifacts": {"events": "...", "metrics": "...", "merged_wav": "..."}}
 ```
 
 See `scripts/e2e_readme_call.py` for a complete driver that does
