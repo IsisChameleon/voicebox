@@ -41,10 +41,13 @@ Ordered by severity. `F#` references are used by the tasks in Part 2.
 
 #### F1 — Live credentials committed to the repository (fix first)
 
-`scripts/e2e_readme_call.py:32-33` hardcodes a real email + password for the readme app's test
+`scripts/e2e_readme_call.py:32-33` hardcoded a real email + password for the readme app's test
 account. They are in git history on a public GitHub repo, so they must be treated as
-compromised regardless of any repo edit. Also of note: `notes.md` at the repo root is pasted
-conversation scratch, not documentation.
+compromised regardless of any repo edit. **Update:** the script has since been deleted outright
+(it was coupled to a private app unavailable to repo users, per F9) rather than fixed — see T1.
+The leaked password still requires human rotation; history rewriting remains out of scope. Also
+of note: `notes.md` at the repo root (pasted conversation scratch, not documentation) has been
+deleted too.
 
 #### F2 — No readiness handshake for the pipecat child; first-run failures are opaque
 
@@ -123,12 +126,12 @@ the useful "don't lose the first word" behavior without the pathology.
 
 #### F9 — End-to-end verification requires a private app; contributors can't run it
 
-`scripts/e2e_readme_call.py` is coupled to one specific private app (Ember: its login form, its
-URL structure, its button labels). The only app-independent checks are the smoke scripts, which
-exercise the audio plumbing but not a real `getUserMedia` + `RTCPeerConnection` round trip.
-There is no fixture a contributor (or CI) can run the full loop against. The repo's own
-verification story ("no unit tests; verify via scripts") therefore only fully works on one
-machine.
+`scripts/e2e_readme_call.py` was coupled to one specific private app (Ember: its login form, its
+URL structure, its button labels) — it has since been deleted outright rather than kept and
+fixed (see T1). The only app-independent checks are the smoke scripts, which exercise the audio
+plumbing but not a real `getUserMedia` + `RTCPeerConnection` round trip. There is no fixture a
+contributor (or CI) can run the full loop against. T9 (fixture app) is now the only planned path
+to full-loop verification that doesn't require a private app.
 
 #### F10 — Tuning knobs are hardcoded
 
@@ -208,24 +211,18 @@ W4: T10  T11  T12  T13         (capabilities; T12 after T9 if possible)
 
 ### Workstream 1 — Hygiene & trust (do first)
 
-#### T1 — Purge committed credentials and make the e2e driver configuration-driven
+#### T1 — Purge committed credentials [DONE — driver deleted outright]
 
 - **Executor:** Sonnet 5 · **Size:** S · **Finding:** F1 · **Depends on:** nothing
-- **Objective:** No secrets in the repo or its future commits; the e2e driver reads its target
-  configuration from the environment.
-- **Contract:**
-  - `scripts/e2e_readme_call.py` obtains credentials and target URL from environment variables
-    (loaded via the existing `python-dotenv` dependency from a gitignored `.env`), with clear
-    startup errors naming the missing variable. No default values that are real credentials.
-  - Add `.env.example` documenting the variables; ensure `.env` is gitignored.
-  - Move or delete `notes.md` (pasted conversation scratch at repo root) — content that is
-    worth keeping goes under `docs/`, the rest is removed.
-  - The task's PR description must state, prominently, that the exposed password must be
-    rotated by a human — the agent cannot do this and must not try. (History rewriting is out
-    of scope; treat the credential as burned.)
-- **Out of scope:** rewriting git history; changing what the e2e script does.
-- **Verify:** `grep -ri` for the leaked address/password over the working tree returns nothing;
-  running the script without env vars fails fast with an instructive message.
+- **Status:** Done. `scripts/e2e_readme_call.py` and `notes.md` were deleted outright (git rm),
+  not made configuration-driven — the maintainer decided the app coupling made it not worth
+  keeping around; full-loop verification is now tracked by T9 (fixture app) instead. All
+  references to the deleted script were scrubbed from `CLAUDE.md`, `README.md`, and this plan.
+- **Remaining scope (still open, human-only):** the leaked email + password are in git history on
+  a public repo and **must be rotated by a human** — an agent cannot do this and must not try.
+  History rewriting remains out of scope; treat the credential as permanently burned regardless.
+  `.env` hygiene (gitignored secrets, no defaults that are real credentials) applies to any future
+  driver that talks to a private app.
 
 #### T2 — CI actually gates: tests, types, correct Python, pinned pipecat
 
@@ -371,8 +368,8 @@ W4: T10  T11  T12  T13         (capabilities; T12 after T9 if possible)
   - External behavior is unchanged: same commands, same error semantics, same `spawn` start
     method (that constraint is documented and stays), same cleanup ordering
     (terminate→kill escalation, queue close/join).
-  - The smoke scripts and `scripts/e2e_readme_call.py` import from `agent_ipc` today — update
-    them to the new construction; keep the diff mechanical.
+  - The smoke scripts import from `agent_ipc` today — update them to the new construction; keep
+    the diff mechanical.
   - Update `CLAUDE.md`'s `agent_ipc.py` row.
 - **Verify:** `uv run python scripts/smoke_full_duplex.py` passes (it exercises correlation
   IDs, out-of-order responses, and concurrent commands — the exact machinery being moved);
@@ -430,8 +427,9 @@ W4: T10  T11  T12  T13         (capabilities; T12 after T9 if possible)
     not know or care whether it's in CI.
   - Document in `CLAUDE.md` (dev-workflow section) as the third verification tier:
     unit (`pytest`), integration (fixture app), e2e (`scripts/` against a real app).
-- **Out of scope:** replacing `e2e_readme_call.py` (it remains the real-app e2e driver); testing
-  cross-origin iframes (that's T12's concern).
+- **Out of scope:** testing cross-origin iframes (that's T12's concern). (The former
+  `e2e_readme_call.py` real-app driver has been deleted outright per T1 — this fixture is now the
+  only planned full-loop verification.)
 - **Verify:** fresh clone → `uv sync` → run the integration tier → green, on a machine that
   has never seen the readme app.
 
@@ -527,8 +525,8 @@ W4: T10  T11  T12  T13         (capabilities; T12 after T9 if possible)
     response latency < 2.5 s", "bot stops talking within X ms of barge-in, after subtracting
     `vad_stop_secs`"), and the judge step (LLM reads `turns` + summary and issues pass/fail
     with citations).
-  - One fully-worked scenario checked in, runnable against the fixture app (or the readme app
-    if T9 hasn't landed, with credentials via T1's env scheme).
+  - One fully-worked scenario checked in, runnable against the fixture app from T9 (the readme
+    app is no longer an option — its driver was deleted per T1).
   - If the repo adopts a Claude skill for this, it lives where `CLAUDE.md` says skills live;
     otherwise the doc is the deliverable. No new server code beyond, at most, trivial
     metric additions that T13 justifies in writing.

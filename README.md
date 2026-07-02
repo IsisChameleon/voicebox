@@ -94,7 +94,6 @@ Cursor (`~/.cursor/mcp.json`):
 //                          leave its --user-data-dir unset — incompatible with --cdp-endpoint.
 //                          Persist auth via this server's user_data_dir instead.)
 //      your own script:   browser = await playwright.chromium.connect_over_cdp("http://localhost:9222")
-//                         (see scripts/e2e_readme_call.py for a full login→navigate→call driver)
 
 // 3. speak — the page's WebRTC peer sends OUR Kokoro audio to the bot
 {"name": "speak", "arguments": {"text": "Hi Ember! Tell me about this book."}}
@@ -108,9 +107,6 @@ Cursor (`~/.cursor/mcp.json`):
 //    Playwright, then:
 {"name": "stop", "arguments": {}}
 ```
-
-See `scripts/e2e_readme_call.py` for a complete driver that does
-login → navigate → call → conversation → end against the readme app.
 
 ## Architecture notes
 

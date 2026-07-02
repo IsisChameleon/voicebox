@@ -47,7 +47,6 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
 | `src/voicebox/shim.js` | The browser shim, injected via `addInitScript` before page code. Overrides `getUserMedia` (Hook 1) and wraps `RTCPeerConnection` (Hook 2). Diagnostics on `window.__voiceShim`. |
 | `src/voicebox/browser_session.py` | Manages the Playwright child process. Supports `user_data_dir` (persistent default context, CDP-coherent — exposed via `start_browser_session` for session reuse). See the CDP context-split trap below for why `storage_state` is intentionally not offered. |
 | `scripts/smoke_browser_shim.py` | Audio-path smoke test (no readme app needed). The reference for `connect_over_cdp` + reading `__voiceShim`. |
-| `scripts/e2e_readme_call.py` | Full e2e driver: login → navigate → call → speak/listen → end, against the readme app. Canonical CDP-driving example. Runs `headless=True` and dumps WAVs. |
 
 ## MCP tools (`server.py`)
 
@@ -140,7 +139,6 @@ uv sync                                   # install (uv, not pip; deps in pyproj
 uv tool install -e .                      # install the `voicebox` CLI entry point
 voicebox                                  # run MCP server on http://localhost:9090/mcp
 uv run python scripts/smoke_browser_shim.py   # audio-path smoke test (no app needed)
-uv run python scripts/e2e_readme_call.py      # full e2e against a localhost:3000 app
 ```
 
 ## Quality checks (run before committing)
@@ -151,8 +149,8 @@ uv run ruff format src/   # format
 uv run pyright src/       # types
 ```
 
-There is **no unit-test suite** — verification is via the two `scripts/` drivers, which need a
-real browser (and, for e2e, a running voice app on `localhost:3000`).
+Verification is via the smoke scripts in `scripts/` (need a real browser) plus the unit tests in
+`tests/`; there is no bundled full-e2e target app.
 
 ## Conventions
 
@@ -162,5 +160,4 @@ real browser (and, for e2e, a running voice app on `localhost:3000`).
 - Single session at a time: ports 9090/9091/9222 are pinned unless overridden via tool args.
 - **All run artifacts go under `temp/` (gitignored, never committed).** Point `record_dir` at
   `temp/<run-name>` for any dogfood/manual run (e.g. `temp/dogfood`), and the `scripts/` drivers
-  write there too (`temp/e2e_readme_call`). Treat it as a scratch dir: WAVs, PNGs, `events.json`,
-  run logs.
+  write there too. Treat it as a scratch dir: WAVs, PNGs, `events.json`, run logs.
