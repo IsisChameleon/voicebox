@@ -88,6 +88,32 @@ applies to any future long child-side wait: the child must enforce a timeout sli
 the parent's deadline and reply with an `error`, so the two sides always agree on whether an
 utterance happened.
 
+**Worked example** (walk through `speak("Sorry, what?", wait_for_turn=True)`):
+
+1. The **parent** (MCP server) puts the command on the queue and starts a stopwatch — it will
+   wait at most 150 s for the child's answer (`deadline=150.0` in `server.py`).
+2. The **child** picks it up. `wait_for_turn=True` means "be polite: wait until the app's bot
+   stops talking, then speak" — so it sits in `_wait_for_app_bot_silent()`, which has **no
+   timeout of its own**. It will wait forever if it has to.
+3. Suppose the app's bot rambles for 4 minutes (or its VAD misbehaves and never signals
+   silence). At the 150 s mark the parent gives up: the `speak` tool call returns
+   `TimeoutError` to the LLM. From the LLM's point of view: *"my speak failed; nothing was
+   said."*
+4. But nobody told the child to stop. Its task is still waiting. At minute 4 the bot finally
+   goes quiet — and the child does exactly what it was asked: it speaks "Sorry, what?" into
+   the mic.
+
+That's the ghost: audio coming out of the synthetic user that the driving LLM believes was
+never delivered. It's especially bad for a *testing* tool because everything downstream trusts
+the record: the LLM, told the speak failed, has likely retried or moved on — so the tester says
+things twice or out of order; the event log records `tester_transcript`/`tester_speech_started`
+for the ghost utterance, so `metrics.json` is computed from a conversation that doesn't match
+the scenario the LLM thought it ran; and the app bot under test *hears* the ghost and responds
+to it, drifting the rest of the session off-script. The `_connected.wait()` before speaking
+(waiting for the browser page to connect) is the same bug through a different door. The fix is
+one rule — **the child must always give up slightly before the parent does** — implemented by
+T5.
+
 #### F5 — CI never runs the tests or the type checker, and targets the wrong Python
 
 - `.github/workflows/build.yaml` and `publish.yaml` run `uv python install 3.10`, but
@@ -260,6 +286,13 @@ W4: T10  T11  T12  T13         (capabilities; T12 after T9 if possible)
 ---
 
 ### Workstream 2 — Runtime robustness
+
+> **Piggyback obligation (from T2's landing):** CI's pyright step is currently
+> `continue-on-error` because of 4 pre-existing type errors: `agent.py:389`
+> (`start_recording` on an `Optional`), and `browser_session.py:30,31,73`
+> (`multiprocessing.Event` used as a type annotation; `.wait()` on an `Optional`). These
+> files are exactly workstream 2's surface: T4 fixes the `browser_session.py` ones, T5 the
+> `agent.py` one, and whichever lands second flips the CI pyright step back to required.
 
 #### T4 — Pipecat-child readiness handshake and startup failure surfacing
 
