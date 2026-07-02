@@ -22,7 +22,7 @@ from loguru import logger
 from pipecat.runner.types import RunnerArguments
 
 from voicebox.agent import create_agent
-from voicebox.agent_ipc import read_request, send_response
+from voicebox.agent_ipc import _READY_ID, read_request, send_response
 
 
 async def bot(runner_args: RunnerArguments):
@@ -40,10 +40,27 @@ async def bot(runner_args: RunnerArguments):
             respond with ``{"ok": True}``.
 
     Failures respond on the ``error`` key and the loop keeps serving commands.
-    """
-    agent = await create_agent(runner_args)
-    await agent.start()
 
+    Before entering the loop the agent constructs its transport and STT/TTS
+    services (downloading models on first run). It then posts a one-shot
+    readiness message on the reserved ``_READY_ID`` so the parent's
+    ``start_browser_session`` can return only once the child can actually serve
+    commands. A startup failure is reported on that same id (with the exception
+    text) and ends the child cleanly instead of surfacing later against the
+    wrong tool call.
+    """
+    try:
+        agent = await create_agent(runner_args)
+        await agent.start()
+    except Exception as e:
+        # Startup failed (bad model path, port bound, import error, ...). Report
+        # it on the readiness id so the parent's start_browser_session fails
+        # with the actual cause, then return so the process exits cleanly.
+        logger.exception("Voice agent failed to start")
+        await send_response({"id": _READY_ID, "error": str(e)})
+        return
+
+    await send_response({"id": _READY_ID, "ready": True})
     logger.info("Voice agent started, processing commands...")
 
     in_flight: set[asyncio.Task] = set()

@@ -19,6 +19,7 @@ must be started fresh — reusing an existing daemon ignores the config).
 """
 
 import multiprocessing
+from multiprocessing.synchronize import Event as MpEvent
 from pathlib import Path
 from typing import Optional
 
@@ -26,9 +27,11 @@ from loguru import logger
 
 SHIM_PATH = Path(__file__).parent / "shim.js"
 
+# ``multiprocessing.Event`` is a factory function, not a type — annotate with
+# the actual synchronization primitive it returns.
 _browser_process: Optional[multiprocessing.Process] = None
-_ready_event: Optional[multiprocessing.Event] = None
-_stop_event: Optional[multiprocessing.Event] = None
+_ready_event: Optional[MpEvent] = None
+_stop_event: Optional[MpEvent] = None
 
 
 def start_browser(
@@ -53,8 +56,12 @@ def start_browser(
 
     stop_browser()
 
-    _ready_event = multiprocessing.Event()
-    _stop_event = multiprocessing.Event()
+    # Local, non-Optional handles so the type checker can see .wait() is valid;
+    # the globals mirror them for stop_browser().
+    ready_event = multiprocessing.Event()
+    stop_event = multiprocessing.Event()
+    _ready_event = ready_event
+    _stop_event = stop_event
     _browser_process = multiprocessing.Process(
         target=_run_browser,
         args=(
@@ -63,14 +70,14 @@ def start_browser(
             cdp_port,
             headless,
             user_data_dir,
-            _ready_event,
-            _stop_event,
+            ready_event,
+            stop_event,
         ),
     )
     _browser_process.start()
     logger.debug(f"Browser child process PID {_browser_process.ident}")
 
-    if not _ready_event.wait(timeout=startup_timeout):
+    if not ready_event.wait(timeout=startup_timeout):
         stop_browser()
         raise RuntimeError(f"Browser failed to become ready within {startup_timeout}s")
 

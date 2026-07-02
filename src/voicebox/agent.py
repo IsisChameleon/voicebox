@@ -278,8 +278,13 @@ class PipecatMCPAgent:
 
         logger.info("Starting Pipecat MCP Agent pipeline...")
 
+        # Constructing these services triggers the first-run model downloads
+        # (Kokoro ~300 MB, Whisper ~1.5 GB). Bracket them with parent-visible
+        # log lines so a long readiness wait is explainable from stderr.
+        logger.info("Loading STT/TTS models (first run downloads them; cached afterward)...")
         stt = self._create_stt_service()
         tts = self._create_tts_service()
+        logger.info("STT/TTS models loaded.")
 
         context = LLMContext()
         user_aggregator, assistant_aggregator = LLMContextAggregatorPair(

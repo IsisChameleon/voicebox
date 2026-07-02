@@ -38,7 +38,7 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
 | File | Role |
 |---|---|
 | `src/voicebox/server.py` | FastMCP HTTP surface (parent). The 4 tools Claude calls. No audio code. Ports: MCP 9090, audio 9091, CDP 9222. |
-| `src/voicebox/agent_ipc.py` | The parent↔pipecat-child mailbox: `multiprocessing.Queue` + child lifecycle. Uses `spawn` (not fork). Full-duplex: requests carry a correlation `id`; a response-router task resolves per-id futures, so commands overlap and responses may arrive out of order. |
+| `src/voicebox/agent_ipc.py` | The parent↔pipecat-child mailbox: `multiprocessing.Queue` + child lifecycle. Uses `spawn` (not fork). Full-duplex: requests carry a correlation `id`; a response-router task resolves per-id futures, so commands overlap and responses may arrive out of order. Also owns the **readiness handshake** (`wait_for_pipecat_ready`): the child posts a reserved-id (`_READY_ID`) `{"ready": True}` / `{"error": …}` message once its transport is bound and STT/TTS are constructed; it rides the same response queue + router. |
 | `src/voicebox/bot.py` | The pipecat child's command loop: reads requests and spawns one task per command (`listen`/`speak`); `stop` cancels in-flight tasks and exits. |
 | `src/voicebox/agent.py` | `PipecatMCPAgent` — owns the Pipecat pipeline behind `WebsocketServerTransport`. STT/TTS/VAD/turn config lives here. |
 | `src/voicebox/runner_args.py` | `BrowserShimRunnerArguments` dataclass (host, port, mic_rate, tap_rate, record_dir). Pipecat ships none for plain WS-server transports. |
@@ -50,7 +50,7 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
 
 ## MCP tools (`server.py`)
 
-- `start_browser_session(url, headless=False, cdp_port=9222, audio_port=9091)` → `{cdp_endpoint, audio_ws_url}`
+- `start_browser_session(url, headless=False, cdp_port=9222, audio_port=9091)` → `{cdp_endpoint, audio_ws_url}`. Returns only once BOTH children are up: the browser page is loaded AND the pipecat child has finished the readiness handshake (transport bound + STT/TTS constructed, incl. first-run model download). Distinguishes three failures in its error text — audio-child startup error (child's exception text), audio-child readiness timeout (names the first-run model download + `~/.cache/kokoro-onnx` / Whisper's own cache), browser startup failure — and reaps both children on any of them.
 - `speak(text, wait_for_playout=False, wait_for_turn=False, when=None, timer_secs=0.0)` → `{queued: true}` when queued. `wait_for_playout=True` returns only after OUR OWN audio finishes playing, adding `{started_at, finished_at, interrupted}` (it waits for our Kokoro audio — NOT the app bot). `wait_for_turn=True` waits until the app bot is silent, then speaks (the polite path). `when=<event>, timer_secs=N` arms a one-shot barge-in: returns `{armed: true}` immediately, then N s after the next `when` event (e.g. `"app_bot_speech_started"`) speaks over the bot. `wait_for_turn`/`when` gate WHEN we start; `wait_for_playout` gates WHEN the call returns.
 - `listen(timeout=30, cursor=0)` → `{events: [...], cursor}` — timestamped conversation events (`session_started`, `session_stopped`, `client_connected/disconnected`, `app_bot_speech_started/stopped`, `app_bot_transcript`, `tester_speech_started/stopped/interrupted`, `tester_transcript`, `tester_barge_in_armed/fired`); pass the returned cursor back to resume; empty `events` on timeout. Two parties: **app_bot** = the app's voice agent under test, **tester** = our synthetic user. Event vocabulary lives in `events.py`.
 - `stop()` → tears down pipecat child + browser child
@@ -82,6 +82,16 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
   resets them.
 - **`spawn`, not fork** (`agent_ipc.py:24`) — forking from the async MCP context copies the event
   loop / fds / locks and breaks.
+- **Readiness handshake, not a sleep** (`agent_ipc.py` `wait_for_pipecat_ready`, `bot.py`,
+  `server.py`). The child reports `{"ready": True}` (or `{"error": …}`) on the reserved `_READY_ID`
+  after `agent.start()` — so `start_browser_session` no longer races a fixed sleep against the WS
+  bind, and a startup crash surfaces the child's exception at the tool boundary instead of failing
+  the first `speak`/`listen` later. Readiness is armed **synchronously** inside `start_pipecat_process`
+  (before the child can answer) so its message can't be dropped as "unmatched". A child that dies
+  *after* readiness is still handled by the router (fails pending futures) exactly as before. First-run
+  model loads log a parent-visible line before/after (`kokoro_tts.py`, `agent.py`). Default readiness
+  ceiling `AUDIO_READY_TIMEOUT=300s` (`server.py`) covers a cold download; warm-cache is sub-second.
+  Smoke scripts wait on readiness instead of `asyncio.sleep(2)`.
 - **Shim is defensive**: every hook is gated on the API existing; on insecure origins (non-localhost
   http, about:blank) or missing WebCodecs the hook is skipped silently. `window.__voiceShim` always
   exists with diagnostics (`installed`, `wsReady`, `inboundChunks`, `outboundChunks`, `errors`, …).

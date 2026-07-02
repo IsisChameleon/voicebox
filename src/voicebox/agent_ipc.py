@@ -34,10 +34,18 @@ _pipecat_process: Optional[multiprocessing.Process] = None
 _pending: dict[str, "asyncio.Future[dict]"] = {}
 _router_task: Optional[asyncio.Task] = None
 
+# Reserved correlation id for the child's one-shot readiness handshake. The
+# child posts {"id": _READY_ID, "ready": True} once its transport is bound and
+# the STT/TTS services are constructed (i.e. after any first-run model
+# download), or {"id": _READY_ID, "error": <text>} if startup fails. It rides
+# the same response queue + router as ordinary commands — no side channel.
+_READY_ID = "__ready__"
+_ready_future: Optional["asyncio.Future[dict]"] = None
+
 
 def _cleanup():
     """Clean up the pipecat child process."""
-    global _pipecat_process, _cmd_queue, _response_queue
+    global _pipecat_process, _cmd_queue, _response_queue, _ready_future
 
     logger.debug(f"Checking if Pipecat MCP Agent process is actually running...")
     if _pipecat_process:
@@ -65,6 +73,10 @@ def _cleanup():
         _response_queue.close()
         _response_queue.join_thread()
         _response_queue = None
+
+    # Drop the readiness reference; if it is still pending the router fails it
+    # via its session-replacement / process-death branch (below).
+    _ready_future = None
 
 
 def start_pipecat_process(runner_args):
@@ -95,6 +107,65 @@ def start_pipecat_process(runner_args):
     )
     _pipecat_process.start()
     logger.debug(f"Started Pipecat MCP Agent process (PID {_pipecat_process.ident})")
+
+    # Arm the readiness handshake synchronously, before the child can possibly
+    # answer: register the reserved-id future and bring the router up now, so
+    # the child's readiness (or startup-error) message is never dropped as
+    # "unmatched" by racing the child's model load.
+    _arm_ready()
+
+
+def _arm_ready():
+    """Register the reserved readiness future and ensure the router is running.
+
+    Must be called from within a running event loop (as ``start_pipecat_process``
+    already is). Split out so tests can drive the readiness protocol against a
+    fake child without spawning a real process.
+    """
+    global _ready_future
+    if _response_queue is None:
+        raise RuntimeError("Pipecat process not started")
+    _ensure_router()
+    _ready_future = asyncio.get_running_loop().create_future()
+    _pending[_READY_ID] = _ready_future
+
+
+async def wait_for_pipecat_ready(timeout: float):
+    """Block until the pipecat child reports it is ready to serve commands.
+
+    The child sends its readiness message after the transport is bound and the
+    STT/TTS services are constructed — on a cold machine that includes the
+    first-run Kokoro (~300 MB) and Whisper (~1.5 GB) model downloads, which is
+    why the default timeout is generous.
+
+    Args:
+        timeout: Max seconds to wait for the readiness handshake.
+
+    Raises:
+        RuntimeError: If the child reported a startup error (its exception text
+            is included), or if the process was never started.
+        TimeoutError: If the child neither became ready nor failed within
+            ``timeout`` — most often a slow first-run model download.
+
+    """
+    global _ready_future
+    if _ready_future is None:
+        raise RuntimeError("Pipecat process not started")
+    try:
+        response = await asyncio.wait_for(_ready_future, timeout=timeout)
+    except asyncio.TimeoutError:
+        raise TimeoutError(
+            f"Voice agent did not become ready within {timeout}s. On a first run "
+            f"this is almost always the model download: Kokoro (~300 MB) caches to "
+            f"~/.cache/kokoro-onnx and Whisper (~1.5 GB) downloads via its own cache. "
+            f"Watch the server's stderr for download progress and retry once cached."
+        ) from None
+    finally:
+        _pending.pop(_READY_ID, None)
+        _ready_future = None
+
+    if "error" in response:
+        raise RuntimeError(f"Voice agent failed to start: {response['error']}")
 
 
 def stop_pipecat_process():
