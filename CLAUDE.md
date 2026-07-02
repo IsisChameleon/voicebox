@@ -44,9 +44,10 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
 | `src/voicebox/runner_args.py` | `BrowserShimRunnerArguments` dataclass (host, port, mic_rate, tap_rate, record_dir). Pipecat ships none for plain WS-server transports. |
 | `src/voicebox/raw_pcm_serializer.py` | Tiny `FrameSerializer`: raw 16-bit LE mono PCM, no protobuf/envelope. |
 | `src/voicebox/processors/kokoro_tts.py` | Kokoro TTS service (`voice_id="af_heart"`). |
-| `src/voicebox/shim.js` | The browser shim, injected via `addInitScript` before page code. Overrides `getUserMedia` (Hook 1) and wraps `RTCPeerConnection` (Hook 2). Diagnostics on `window.__voiceShim`. |
+| `src/voicebox/shim.js` | The browser shim, injected via `addInitScript` before page code. Overrides `getUserMedia` (Hook 1) and wraps `RTCPeerConnection` (Hook 2). Diagnostics on `window.__voiceShim`. Pre-connection inbound buffer is bounded and drop-oldest (see traps below). |
 | `src/voicebox/browser_session.py` | Manages the Playwright child process. Supports `user_data_dir` (persistent default context, CDP-coherent — exposed via `start_browser_session` for session reuse). See the CDP context-split trap below for why `storage_state` is intentionally not offered. |
 | `scripts/smoke_browser_shim.py` | Audio-path smoke test (no readme app needed). The reference for `connect_over_cdp` + reading `__voiceShim`. |
+| `scripts/smoke_shim_buffer_bound.py` | Model-free smoke test for the shim's bounded pre-connection buffer (T6/F8): fake WS server + Playwright, no pipecat/Kokoro/Whisper needed. |
 
 ## MCP tools (`server.py`)
 
@@ -108,6 +109,17 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
 - **Shim is defensive**: every hook is gated on the API existing; on insecure origins (non-localhost
   http, about:blank) or missing WebCodecs the hook is skipped silently. `window.__voiceShim` always
   exists with diagnostics (`installed`, `wsReady`, `inboundChunks`, `outboundChunks`, `errors`, …).
+- **`pendingInbound` (shim.js) is a bounded, drop-oldest buffer** (T6/F8): inbound frames arriving
+  before the page calls `getUserMedia` accumulate only up to `PENDING_INBOUND_MAX_SECS` (3s) of
+  audio at MIC_RATE, tracked by summing each `AudioData`'s `numberOfFrames` (frame *count* is not a
+  stable proxy for duration — inbound WS chunks are variable-length). On overflow the oldest frames
+  are evicted and `close()`d (AudioData holds memory outside the JS heap — an unclosed backlog would
+  leak for the life of the tab). Diagnostics: `pendingInboundMaxSamples` (the bound, informational),
+  `droppedInboundFrames`/`droppedInboundSamples` (overflow counters), `lastMicHandoffFrames`/
+  `lastMicHandoffSamples` (backlog actually handed to the most recently created synthetic mic
+  track — bounded by construction, so a late `getUserMedia()` gets near-live audio, not a replay of
+  the whole pre-connection history). Verified end-to-end (no models needed) by
+  `scripts/smoke_shim_buffer_bound.py`.
 - **Known limitation:** the `RTCPeerConnection` wrap can't reach peer connections inside cross-origin
   iframes or Web Workers (e.g. Daily Prebuilt `<DailyIframe>`).
 - **CDP context split (verified — why only `user_data_dir` is offered):** `chromium.launch()` +

@@ -367,9 +367,21 @@ W4: T10  T11  T12  T13         (capabilities; T12 after T9 if possible)
   the named error; no silent success); and a `wait_for_turn` speak whose deadline expires must
   produce no `tester_speech_started` event afterward (poll the event log to prove it).
 
-#### T6 — Shim inbound-buffer bounds and AudioData lifecycle
+#### T6 — Shim inbound-buffer bounds and AudioData lifecycle [DONE]
 
 - **Executor:** Sonnet 5 · **Size:** S · **Finding:** F8 · **Depends on:** nothing
+- **Status:** Done. `pendingInbound` (`shim.js`) is now bounded by total buffered duration —
+  `PENDING_INBOUND_MAX_SECS = 3` (≈576 KB of Float32 PCM worst case), tracked via each
+  `AudioData.numberOfFrames` since inbound WS chunks are variable-length (frame count alone isn't a
+  stable proxy for duration). Overflow drops the oldest frames and `close()`s them. New diagnostics:
+  `pendingInboundMaxSamples`, `droppedInboundFrames`, `droppedInboundSamples`,
+  `lastMicHandoffFrames`, `lastMicHandoffSamples`. Fan-out (`writeToMicWriters`), the track-id
+  dedupe, and Hook 2 are untouched. Verified live (no models needed) by
+  `scripts/smoke_shim_buffer_bound.py`: a fake WS server bursts 6s of audio at a page before
+  `getUserMedia`; observed `droppedInboundFrames=30`, `droppedInboundSamples=144000` (exactly the
+  3s bound), and the eventual mic track's handoff (`lastMicHandoffSamples=144000`) equals the bound
+  and is well under the 288000 samples sent — proving drop-oldest + near-live handoff, not a full
+  backlog replay.
 - **Contract:**
   - `pendingInbound` becomes a bounded buffer (on the order of a few seconds of audio at
     MIC_RATE; pick a constant and document why). On overflow, the oldest frames are dropped
