@@ -29,6 +29,7 @@ from voicebox.agent_ipc import (
 )
 from voicebox.browser_session import start_browser, stop_browser
 from voicebox.runner_args import BrowserShimRunnerArguments
+from voicebox.timeouts import ARM_ACK_DEADLINE_SECS, speak_parent_deadline
 
 logger.remove()
 logger.add(sys.stderr, level="DEBUG")
@@ -223,6 +224,14 @@ async def listen(timeout: float = 30.0, cursor: int = 0) -> dict:
         finishing / being cut off at playout.
       * ``tester_transcript`` — the exact text WE spoke (``text``); the
         ground-truth ``speak()`` input, emitted at speak time (not via STT).
+        Only ever emitted when the speech is actually queued to a connected
+        client, so it never records speech that didn't physically happen.
+      * ``tester_barge_in_armed`` / ``tester_barge_in_fired`` — a one-shot
+        ``speak(when=...)`` trigger was armed / fired and is about to speak.
+      * ``tester_barge_in_dropped`` — an armed trigger reached its fire moment
+        but no client was connected within the grace period, so the utterance
+        was dropped (no speech) instead of queued into a dead transport;
+        carries ``when``, ``triggered_by_t`` and ``reason``.
 
     To simply wait for the next thing the app bot says: call in a loop with
     the advancing cursor and act on ``app_bot_transcript`` events.
@@ -258,6 +267,13 @@ async def speak(
     ``wait_for_turn`` and ``when`` control WHEN we start speaking;
     ``wait_for_playout`` controls WHEN this call returns. They are independent.
 
+    Requires a connected browser client. If none is connected (e.g. the page
+    reloaded, or never called getUserMedia), the call waits a short grace period
+    for a reconnection and then fails with an error naming the situation rather
+    than silently losing the audio — and no ``tester_transcript`` is logged for
+    a refused speak. Every internal wait gives up before this call's deadline, so
+    a ``speak`` that returns an error never later produces audio.
+
     Args:
         text: The text to speak.
         wait_for_playout: When false (default), returns as soon as the speech is
@@ -283,12 +299,15 @@ async def speak(
         plus the playout timing fields when ``wait_for_playout`` is true.
 
     """
+    # Deadlines derive from the child's per-wait budgets (voicebox.timeouts) so
+    # the child always gives up strictly before the parent — no ghost speech
+    # (finding F4), and no two magic numbers that can drift.
     if when is not None:
-        deadline = 60.0  # armed, returns immediately
-    elif wait_for_playout or wait_for_turn:
-        deadline = 150.0
+        deadline = ARM_ACK_DEADLINE_SECS  # armed, returns immediately
     else:
-        deadline = 60.0
+        deadline = speak_parent_deadline(
+            wait_for_turn=wait_for_turn, wait_for_playout=wait_for_playout
+        )
     return await send_command(
         "speak",
         text=text,

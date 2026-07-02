@@ -287,12 +287,12 @@ W4: T10  T11  T12  T13         (capabilities; T12 after T9 if possible)
 
 ### Workstream 2 — Runtime robustness
 
-> **Piggyback obligation (from T2's landing):** CI's pyright step is currently
+> **Piggyback obligation (from T2's landing) — DONE:** CI's pyright step was
 > `continue-on-error` because of 4 pre-existing type errors: `agent.py:389`
 > (`start_recording` on an `Optional`), and `browser_session.py:30,31,73`
-> (`multiprocessing.Event` used as a type annotation; `.wait()` on an `Optional`). These
-> files are exactly workstream 2's surface: T4 fixes the `browser_session.py` ones, T5 the
-> `agent.py` one, and whichever lands second flips the CI pyright step back to required.
+> (`multiprocessing.Event` used as a type annotation; `.wait()` on an `Optional`). T4 fixed the
+> `browser_session.py` ones; T5 fixed the `agent.py` one (local-binding narrowing) and, as the
+> second lander, flipped the CI pyright step back to required. `uv run pyright src/` is fully clean.
 
 #### T4 — Pipecat-child readiness handshake and startup failure surfacing
 
@@ -325,10 +325,19 @@ W4: T10  T11  T12  T13         (capabilities; T12 after T9 if possible)
   point Kokoro at an invalid model path via a temporary env/arg) and confirm the tool call
   fails with the child's error text, ports released, no zombie processes (`ps` clean).
 
-#### T5 — Coherent connection-state and deadline semantics for `speak`
+#### T5 — Coherent connection-state and deadline semantics for `speak` [DONE]
 
 - **Executor:** Opus 4.8 · **Size:** M · **Findings:** F3, F4 · **Depends on:** T4 (readiness
   makes "not connected" unambiguous), can be built standalone if T4 is delayed
+- **Status:** Done. Shared constants live in `src/voicebox/timeouts.py` (imported by both
+  `server.py` and `agent.py`, no circularity); the parent deadline is `speak_parent_deadline()`
+  = child budget + `IPC_MARGIN_SECS` (15 s), grace period `CONNECT_GRACE_SECS` = 10 s. Connection
+  tracking is stateful (`_connected` cleared on disconnect). New event
+  `tester_barge_in_dropped` (with `reason`) is logged when an armed trigger fires while
+  disconnected. Piggyback done: `agent.py` `start_recording` narrowing fixed and the CI pyright
+  step flipped back to required (`.github/workflows/build.yaml`). Unit-verified in
+  `tests/test_speak_deadlines.py`; the live audio path is covered by `scripts/smoke_reconnect.py`,
+  which the maintainer must run on localhost (models can't be fetched in the sandbox).
 - **Objective:** `speak` never silently talks into a dead transport, never speaks *after* the
   caller was told it failed, and disconnect/reconnect round-trips work.
 - **Contract:**

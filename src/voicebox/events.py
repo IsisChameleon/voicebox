@@ -42,6 +42,7 @@ class EventType(str, Enum):
     TESTER_TRANSCRIPT = "tester_transcript"
     TESTER_BARGE_IN_ARMED = "tester_barge_in_armed"
     TESTER_BARGE_IN_FIRED = "tester_barge_in_fired"
+    TESTER_BARGE_IN_DROPPED = "tester_barge_in_dropped"
 
 
 class VoiceboxEvent(BaseModel):
@@ -119,3 +120,21 @@ class TesterBargeInFiredEvent(VoiceboxEvent):
     type: EventType = EventType.TESTER_BARGE_IN_FIRED
     when: str
     triggered_by_t: float
+
+
+class TesterBargeInDroppedEvent(VoiceboxEvent):
+    """An armed barge-in trigger reached its fire moment but could not speak.
+
+    Emitted instead of ``tester_barge_in_fired`` when the trigger's ``when``
+    event occurred and its ``timer_secs`` delay elapsed, but no browser client
+    was connected to the audio WebSocket within the connection grace period. The
+    utterance is dropped rather than queued into a dead transport, so no
+    ``tester_transcript`` and no audio follow. ``triggered_by_t`` is the ``t`` of
+    the ``when`` event that fired the trigger; ``reason`` names why it was
+    dropped.
+    """
+
+    type: EventType = EventType.TESTER_BARGE_IN_DROPPED
+    when: str
+    triggered_by_t: float
+    reason: str = "no_client_connected"

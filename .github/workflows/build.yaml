@@ -34,15 +34,8 @@ jobs:
       - name: Run tests
         run: uv run pytest
 
-      # continue-on-error: pyright currently reports 4 pre-existing errors
-      # (agent.py:389, browser_session.py:30,31,73 — Optional/global typing,
-      # unrelated to this CI change) that predate this workflow step. Keep
-      # the step visible so regressions are caught, but non-blocking until a
-      # follow-up task fixes those findings and this is flipped back to
-      # required.
       - name: Type check
         run: uv run pyright src/
-        continue-on-error: true
 
       - name: Build project
         run: uv build
