@@ -32,6 +32,7 @@ async def main():
         send_command,
         start_pipecat_process,
         stop_pipecat_process,
+        wait_for_pipecat_ready,
     )
     from voicebox.browser_session import start_browser, stop_browser
     from voicebox.runner_args import BrowserShimRunnerArguments
@@ -49,8 +50,9 @@ async def main():
     logger.info("=== starting pipecat in browser-shim mode ===")
     start_pipecat_process(BrowserShimRunnerArguments(host="localhost", port=audio_port))
 
-    # Give pipecat a moment to bind the WS port.
-    await asyncio.sleep(2)
+    # Block on the readiness handshake instead of a fixed sleep: it returns once
+    # the transport is bound and models are loaded (first run downloads them).
+    await wait_for_pipecat_ready(timeout=300.0)
 
     logger.info("=== launching Chromium with shim ===")
     try:

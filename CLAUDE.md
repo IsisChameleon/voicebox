@@ -38,22 +38,22 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
 | File | Role |
 |---|---|
 | `src/voicebox/server.py` | FastMCP HTTP surface (parent). The 4 tools Claude calls. No audio code. Ports: MCP 9090, audio 9091, CDP 9222. |
-| `src/voicebox/agent_ipc.py` | The parent↔pipecat-child mailbox: `multiprocessing.Queue` + child lifecycle. Uses `spawn` (not fork). Full-duplex: requests carry a correlation `id`; a response-router task resolves per-id futures, so commands overlap and responses may arrive out of order. |
+| `src/voicebox/agent_ipc.py` | The parent↔pipecat-child mailbox: `multiprocessing.Queue` + child lifecycle. Uses `spawn` (not fork). Full-duplex: requests carry a correlation `id`; a response-router task resolves per-id futures, so commands overlap and responses may arrive out of order. Also owns the **readiness handshake** (`wait_for_pipecat_ready`): the child posts a reserved-id (`_READY_ID`) `{"ready": True}` / `{"error": …}` message once its transport is bound and STT/TTS are constructed; it rides the same response queue + router. |
 | `src/voicebox/bot.py` | The pipecat child's command loop: reads requests and spawns one task per command (`listen`/`speak`); `stop` cancels in-flight tasks and exits. |
 | `src/voicebox/agent.py` | `PipecatMCPAgent` — owns the Pipecat pipeline behind `WebsocketServerTransport`. STT/TTS/VAD/turn config lives here. |
 | `src/voicebox/runner_args.py` | `BrowserShimRunnerArguments` dataclass (host, port, mic_rate, tap_rate, record_dir). Pipecat ships none for plain WS-server transports. |
 | `src/voicebox/raw_pcm_serializer.py` | Tiny `FrameSerializer`: raw 16-bit LE mono PCM, no protobuf/envelope. |
 | `src/voicebox/processors/kokoro_tts.py` | Kokoro TTS service (`voice_id="af_heart"`). |
-| `src/voicebox/shim.js` | The browser shim, injected via `addInitScript` before page code. Overrides `getUserMedia` (Hook 1) and wraps `RTCPeerConnection` (Hook 2). Diagnostics on `window.__voiceShim`. |
+| `src/voicebox/shim.js` | The browser shim, injected via `addInitScript` before page code. Overrides `getUserMedia` (Hook 1) and wraps `RTCPeerConnection` (Hook 2). Diagnostics on `window.__voiceShim`. Pre-connection inbound buffer is bounded and drop-oldest (see traps below). |
 | `src/voicebox/browser_session.py` | Manages the Playwright child process. Supports `user_data_dir` (persistent default context, CDP-coherent — exposed via `start_browser_session` for session reuse). See the CDP context-split trap below for why `storage_state` is intentionally not offered. |
 | `scripts/smoke_browser_shim.py` | Audio-path smoke test (no readme app needed). The reference for `connect_over_cdp` + reading `__voiceShim`. |
-| `scripts/e2e_readme_call.py` | Full e2e driver: login → navigate → call → speak/listen → end, against the readme app. Canonical CDP-driving example. Runs `headless=True` and dumps WAVs. |
+| `scripts/smoke_shim_buffer_bound.py` | Model-free smoke test for the shim's bounded pre-connection buffer (T6/F8): fake WS server + Playwright, no pipecat/Kokoro/Whisper needed. |
 
 ## MCP tools (`server.py`)
 
-- `start_browser_session(url, headless=False, cdp_port=9222, audio_port=9091)` → `{cdp_endpoint, audio_ws_url}`
-- `speak(text, wait_for_playout=False, wait_for_turn=False, when=None, timer_secs=0.0)` → `{queued: true}` when queued. `wait_for_playout=True` returns only after OUR OWN audio finishes playing, adding `{started_at, finished_at, interrupted}` (it waits for our Kokoro audio — NOT the app bot). `wait_for_turn=True` waits until the app bot is silent, then speaks (the polite path). `when=<event>, timer_secs=N` arms a one-shot barge-in: returns `{armed: true}` immediately, then N s after the next `when` event (e.g. `"app_bot_speech_started"`) speaks over the bot. `wait_for_turn`/`when` gate WHEN we start; `wait_for_playout` gates WHEN the call returns.
-- `listen(timeout=30, cursor=0)` → `{events: [...], cursor}` — timestamped conversation events (`session_started`, `session_stopped`, `client_connected/disconnected`, `app_bot_speech_started/stopped`, `app_bot_transcript`, `tester_speech_started/stopped/interrupted`, `tester_transcript`, `tester_barge_in_armed/fired`); pass the returned cursor back to resume; empty `events` on timeout. Two parties: **app_bot** = the app's voice agent under test, **tester** = our synthetic user. Event vocabulary lives in `events.py`.
+- `start_browser_session(url, headless=False, cdp_port=9222, audio_port=9091)` → `{cdp_endpoint, audio_ws_url}`. Returns only once BOTH children are up: the browser page is loaded AND the pipecat child has finished the readiness handshake (transport bound + STT/TTS constructed, incl. first-run model download). Distinguishes three failures in its error text — audio-child startup error (child's exception text), audio-child readiness timeout (names the first-run model download + `~/.cache/kokoro-onnx` / Whisper's own cache), browser startup failure — and reaps both children on any of them.
+- `speak(text, wait_for_playout=False, wait_for_turn=False, when=None, timer_secs=0.0)` → `{queued: true}` when queued. `wait_for_playout=True` returns only after OUR OWN audio finishes playing, adding `{started_at, finished_at, interrupted}` (it waits for our Kokoro audio — NOT the app bot). `wait_for_turn=True` waits until the app bot is silent, then speaks (the polite path). `when=<event>, timer_secs=N` arms a one-shot barge-in: returns `{armed: true}` immediately, then N s after the next `when` event (e.g. `"app_bot_speech_started"`) speaks over the bot. `wait_for_turn`/`when` gate WHEN we start; `wait_for_playout` gates WHEN the call returns. **Requires a connected client:** with no shim client connected, `speak` waits a short grace period (`CONNECT_GRACE_SECS`) then fails with "no browser client connected to the audio WebSocket — has the page called getUserMedia?" and logs NO `tester_transcript` (see the deadline-coherence trap below).
+- `listen(timeout=30, cursor=0)` → `{events: [...], cursor}` — timestamped conversation events (`session_started`, `session_stopped`, `client_connected/disconnected`, `app_bot_speech_started/stopped`, `app_bot_transcript`, `tester_speech_started/stopped/interrupted`, `tester_transcript`, `tester_barge_in_armed/fired/dropped`); pass the returned cursor back to resume; empty `events` on timeout. Two parties: **app_bot** = the app's voice agent under test, **tester** = our synthetic user. `tester_barge_in_dropped` fires when an armed `when=` trigger reached its fire moment but no client was connected — the utterance is dropped (no speech) rather than queued into a dead transport. Event vocabulary lives in `events.py`.
 - `stop()` → tears down pipecat child + browser child
 
 ## Non-obvious facts & traps (verified, don't re-derive)
@@ -71,6 +71,19 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
 - **`RTCPeerConnection` track events are deduped by `track.id`** (`shim.js:181-246`) — Daily opens
   multiple peer connections and the same logical audio surfaces more than once (commits `26bd9c5`,
   `2b3d7f1`).
+- **Speak deadline coherence — child always gives up before the parent** (`timeouts.py`, T5/F4).
+  Every child-side wait inside `speak` (connection grace, `wait_for_turn`'s silence wait,
+  `wait_for_playout`'s playout wait) has a timeout strictly below the parent's per-shape deadline,
+  and expiry resolves the command with an `error`. Invariant: once the parent surfaces an error for
+  a `speak`, that speak can NEVER later produce audio (no "ghost speech"). The parent deadline
+  (`server.py`) is derived from the child's budgets via `speak_parent_deadline()` = child budget +
+  `IPC_MARGIN_SECS` — both sides import `voicebox.timeouts`, so the numbers can't drift. Connection
+  state is **stateful**: `_connected` is set on connect and CLEARED on disconnect, so `speak` never
+  queues audio into a transport with no client; `tester_transcript` is emitted only once the speech
+  is actually queued to a live client (the event log's ground-truth invariant). Armed `when=`
+  triggers are exempt from parent deadlines (they return `{armed: true}`) but still honor the
+  connection rule: a trigger firing while disconnected logs `tester_barge_in_dropped` instead of
+  speaking.
 - **`enable_rtvi=False`** (`agent.py:133-137`) — we're a headless synthetic user; transcripts reach
   Claude via `listen()`'s return value, not RTVI data-channel notifications.
 - **Timestamps surface via the event log** (Stage 2): a pipeline observer in `agent.py` turns
@@ -83,9 +96,30 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
   resets them.
 - **`spawn`, not fork** (`agent_ipc.py:24`) — forking from the async MCP context copies the event
   loop / fds / locks and breaks.
+- **Readiness handshake, not a sleep** (`agent_ipc.py` `wait_for_pipecat_ready`, `bot.py`,
+  `server.py`). The child reports `{"ready": True}` (or `{"error": …}`) on the reserved `_READY_ID`
+  after `agent.start()` — so `start_browser_session` no longer races a fixed sleep against the WS
+  bind, and a startup crash surfaces the child's exception at the tool boundary instead of failing
+  the first `speak`/`listen` later. Readiness is armed **synchronously** inside `start_pipecat_process`
+  (before the child can answer) so its message can't be dropped as "unmatched". A child that dies
+  *after* readiness is still handled by the router (fails pending futures) exactly as before. First-run
+  model loads log a parent-visible line before/after (`kokoro_tts.py`, `agent.py`). Default readiness
+  ceiling `AUDIO_READY_TIMEOUT=300s` (`server.py`) covers a cold download; warm-cache is sub-second.
+  Smoke scripts wait on readiness instead of `asyncio.sleep(2)`.
 - **Shim is defensive**: every hook is gated on the API existing; on insecure origins (non-localhost
   http, about:blank) or missing WebCodecs the hook is skipped silently. `window.__voiceShim` always
   exists with diagnostics (`installed`, `wsReady`, `inboundChunks`, `outboundChunks`, `errors`, …).
+- **`pendingInbound` (shim.js) is a bounded, drop-oldest buffer** (T6/F8): inbound frames arriving
+  before the page calls `getUserMedia` accumulate only up to `PENDING_INBOUND_MAX_SECS` (3s) of
+  audio at MIC_RATE, tracked by summing each `AudioData`'s `numberOfFrames` (frame *count* is not a
+  stable proxy for duration — inbound WS chunks are variable-length). On overflow the oldest frames
+  are evicted and `close()`d (AudioData holds memory outside the JS heap — an unclosed backlog would
+  leak for the life of the tab). Diagnostics: `pendingInboundMaxSamples` (the bound, informational),
+  `droppedInboundFrames`/`droppedInboundSamples` (overflow counters), `lastMicHandoffFrames`/
+  `lastMicHandoffSamples` (backlog actually handed to the most recently created synthetic mic
+  track — bounded by construction, so a late `getUserMedia()` gets near-live audio, not a replay of
+  the whole pre-connection history). Verified end-to-end (no models needed) by
+  `scripts/smoke_shim_buffer_bound.py`.
 - **Known limitation:** the `RTCPeerConnection` wrap can't reach peer connections inside cross-origin
   iframes or Web Workers (e.g. Daily Prebuilt `<DailyIframe>`).
 - **CDP context split (verified — why only `user_data_dir` is offered):** `chromium.launch()` +
@@ -140,7 +174,6 @@ uv sync                                   # install (uv, not pip; deps in pyproj
 uv tool install -e .                      # install the `voicebox` CLI entry point
 voicebox                                  # run MCP server on http://localhost:9090/mcp
 uv run python scripts/smoke_browser_shim.py   # audio-path smoke test (no app needed)
-uv run python scripts/e2e_readme_call.py      # full e2e against a localhost:3000 app
 ```
 
 ## Quality checks (run before committing)
@@ -151,8 +184,8 @@ uv run ruff format src/   # format
 uv run pyright src/       # types
 ```
 
-There is **no unit-test suite** — verification is via the two `scripts/` drivers, which need a
-real browser (and, for e2e, a running voice app on `localhost:3000`).
+Verification is via the smoke scripts in `scripts/` (need a real browser) plus the unit tests in
+`tests/`; there is no bundled full-e2e target app.
 
 ## Conventions
 
@@ -162,5 +195,4 @@ real browser (and, for e2e, a running voice app on `localhost:3000`).
 - Single session at a time: ports 9090/9091/9222 are pinned unless overridden via tool args.
 - **All run artifacts go under `temp/` (gitignored, never committed).** Point `record_dir` at
   `temp/<run-name>` for any dogfood/manual run (e.g. `temp/dogfood`), and the `scripts/` drivers
-  write there too (`temp/e2e_readme_call`). Treat it as a scratch dir: WAVs, PNGs, `events.json`,
-  run logs.
+  write there too. Treat it as a scratch dir: WAVs, PNGs, `events.json`, run logs.

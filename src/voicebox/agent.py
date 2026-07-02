@@ -70,6 +70,7 @@ from voicebox.events import (
     EventType,
     SessionStartedEvent,
     TesterBargeInArmedEvent,
+    TesterBargeInDroppedEvent,
     TesterBargeInFiredEvent,
     TesterTranscriptEvent,
     TranscriptEvent,
@@ -79,6 +80,12 @@ from voicebox.metrics import compute_metrics
 from voicebox.processors.kokoro_tts import KokoroTTSService
 from voicebox.raw_pcm_serializer import RawPCMSerializer
 from voicebox.runner_args import BrowserShimRunnerArguments
+from voicebox.timeouts import (
+    APP_BOT_SILENCE_TIMEOUT_SECS,
+    CONNECT_GRACE_SECS,
+    PLAYOUT_SETTLE_SECS,
+    PLAYOUT_TIMEOUT_SECS,
+)
 
 load_dotenv(override=True)
 
@@ -88,15 +95,10 @@ load_dotenv(override=True)
 # consumers can subtract it.
 VAD_STOP_SECS = 1.0
 
-# Max seconds speak(wait_for_playout=True) waits for our audio to finish playing out.
-PLAYOUT_TIMEOUT_SECS = 120.0
-
-# Kokoro's playout reaches the transport in segments separated by sub-second
-# gaps, so pipecat emits a BotStarted/StoppedSpeakingFrame PAIR per segment.
-# speak(wait_for_playout=True) treats the playout as finished only after the bot has stayed
-# silent this long, so the reported span covers the whole utterance instead of
-# clipping at the first segment.
-PLAYOUT_SETTLE_SECS = 1.0
+# The speak-related deadlines/timeouts (PLAYOUT_TIMEOUT_SECS, PLAYOUT_SETTLE_SECS,
+# CONNECT_GRACE_SECS, APP_BOT_SILENCE_TIMEOUT_SECS) live in voicebox.timeouts so
+# the parent's speak deadline in server.py derives from the same numbers and the
+# child always gives up before the parent (see finding F4).
 
 
 class _PipelineEventObserver(BaseObserver):
@@ -211,6 +213,9 @@ class PipecatMCPAgent:
         self._task: Optional[asyncio.Task] = None
         self._pipeline_task: Optional[PipelineWorker] = None
         self._pipeline_runner: Optional[WorkerRunner] = None
+        # Stateful "is a shim client currently connected": set on connect,
+        # CLEARED on disconnect. speak() waits on it (with a grace timeout) so it
+        # never queues audio into a transport with no client.
         self._connected = asyncio.Event()
 
         # Monotonic event log; listen_events() blocks on the condition until
@@ -278,8 +283,13 @@ class PipecatMCPAgent:
 
         logger.info("Starting Pipecat MCP Agent pipeline...")
 
+        # Constructing these services triggers the first-run model downloads
+        # (Kokoro ~300 MB, Whisper ~1.5 GB). Bracket them with parent-visible
+        # log lines so a long readiness wait is explainable from stderr.
+        logger.info("Loading STT/TTS models (first run downloads them; cached afterward)...")
         stt = self._create_stt_service()
         tts = self._create_tts_service()
+        logger.info("STT/TTS models loaded.")
 
         context = LLMContext()
         user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
@@ -352,6 +362,10 @@ class PipecatMCPAgent:
         @self._transport.event_handler("on_client_disconnected")
         async def on_disconnected(transport, client):
             logger.info("Client disconnected")
+            # Connection state is stateful: clear it so a subsequent speak sees
+            # "no client currently connected" and waits for a reconnect (or
+            # fails cleanly) instead of queueing audio into a dead transport.
+            self._connected.clear()
             await self._emit(VoiceboxEvent(type=EventType.CLIENT_DISCONNECTED))
 
         @user_aggregator.event_handler("on_user_turn_stopped")
@@ -383,10 +397,13 @@ class PipecatMCPAgent:
         self._task = asyncio.create_task(self._pipeline_runner.run())
 
         if self._audio_buffer is not None:
+            # Bind to a local so the closure captures a non-Optional reference —
+            # attribute narrowing does not cross the nested-function boundary.
+            audio_buffer = self._audio_buffer
 
             async def _start_recording():
                 await self._connected.wait()
-                await self._audio_buffer.start_recording()
+                await audio_buffer.start_recording()
                 logger.info("Audio recording started")
 
             asyncio.create_task(_start_recording())
@@ -609,13 +626,22 @@ class PipecatMCPAgent:
             task.add_done_callback(self._armed_tasks.discard)
             return {"armed": True}
 
-        await self._connected.wait()
+        # Refuse to speak into a dead transport: wait a short grace period for a
+        # (re)connection, then fail. This raises BEFORE any tester_transcript is
+        # emitted, so the event log never records speech that didn't happen.
+        await self._wait_for_connection(CONNECT_GRACE_SECS)
 
         if wait_for_turn:
-            await self._wait_for_app_bot_silent()
+            # Child-side timeout STRICTLY below the parent's deadline: if the app
+            # bot never falls silent, the child errors here — no ghost speech
+            # after the parent already reported the call failed (finding F4).
+            await self._wait_for_app_bot_silent(APP_BOT_SILENCE_TIMEOUT_SECS)
 
         # Log what we said (ground-truth input, not STT) so the event stream is
-        # a complete two-sided transcript.
+        # a complete two-sided transcript. Reached only once we know a client is
+        # connected and (for wait_for_turn) the bot is silent — so a
+        # tester_transcript always corresponds to speech queued to a live
+        # transport.
         await self._emit(TesterTranscriptEvent(text=text))
 
         if not wait_for_playout:
@@ -630,14 +656,54 @@ class PipecatMCPAgent:
             try:
                 await self._queue_speak_frames(text)
                 result = await asyncio.wait_for(self._playout.future, timeout=PLAYOUT_TIMEOUT_SECS)
+            except asyncio.TimeoutError:
+                raise RuntimeError(
+                    f"tester audio did not finish playing out within {PLAYOUT_TIMEOUT_SECS}s"
+                ) from None
             finally:
                 self._playout = None
         return {"queued": True, **result}
 
-    async def _wait_for_app_bot_silent(self):
-        """Block until the app bot is not currently speaking."""
-        async with self._event_cond:
-            await self._event_cond.wait_for(lambda: not self._app_bot_speaking)
+    async def _wait_for_connection(self, timeout: float):
+        """Block until a shim client is connected, or fail after ``timeout``.
+
+        Args:
+            timeout: Max seconds to wait for a (re)connection.
+
+        Raises:
+            RuntimeError: If no client connects within ``timeout``.
+
+        """
+        try:
+            await asyncio.wait_for(self._connected.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                "no browser client connected to the audio WebSocket — "
+                "has the page called getUserMedia?"
+            ) from None
+
+    async def _wait_for_app_bot_silent(self, timeout: float):
+        """Block until the app bot is not currently speaking, or time out.
+
+        Args:
+            timeout: Max seconds to wait for the app bot to fall silent.
+
+        Raises:
+            RuntimeError: If the app bot is still speaking after ``timeout`` —
+                the child gives up here rather than speaking after the parent's
+                deadline has already reported the call failed.
+
+        """
+        try:
+            async with self._event_cond:
+                await asyncio.wait_for(
+                    self._event_cond.wait_for(lambda: not self._app_bot_speaking),
+                    timeout=timeout,
+                )
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                f"app bot did not fall silent within {timeout}s (wait_for_turn)"
+            ) from None
 
     async def _armed_speak(self, text: str, when: str, timer_secs: float, start: int):
         """Background trigger: wait for the next ``when`` event, then speak.
@@ -655,7 +721,16 @@ class PipecatMCPAgent:
             triggered = next(e for e in self._events[start:] if e.type == when)
 
         await asyncio.sleep(timer_secs)
-        await self._connected.wait()
+
+        # Armed triggers are exempt from parent deadlines, but must still respect
+        # the connection rules: if no client is connected within the grace
+        # period, log a distinguishable event and DROP the utterance rather than
+        # speak into a dead transport (no fired event, no transcript, no audio).
+        try:
+            await self._wait_for_connection(CONNECT_GRACE_SECS)
+        except RuntimeError:
+            await self._emit(TesterBargeInDroppedEvent(when=when, triggered_by_t=triggered.t))
+            return
 
         await self._emit(TesterBargeInFiredEvent(when=when, triggered_by_t=triggered.t))
         await self._emit(TesterTranscriptEvent(text=text))

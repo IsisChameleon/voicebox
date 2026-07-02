@@ -37,6 +37,21 @@
   const TAP_RATE = 16000;
   const TAG = '[voice-shim]';
 
+  // Bound on the pre-connection inbound buffer (`pendingInbound`, below).
+  // Inbound WS frames are variable-length PCM chunks — the sender (pipecat)
+  // decides chunk size, not us — so "N frames" is not a stable proxy for
+  // "N seconds of audio". Bound by total buffered *duration* instead, using
+  // each AudioData's own `numberOfFrames` (sample count at MIC_RATE).
+  //
+  // Three seconds is enough to preserve the "don't lose the first word"
+  // behavior this buffer exists for — the app calling getUserMedia() and our
+  // WS handshake both normally resolve in well under a second — while
+  // bounding the worst case (a mis-pointed page, or an app that never asks
+  // for a mic) to a few hundred KB of Float32 PCM instead of growing for the
+  // life of the tab: 3s * 48000 samples/s * 4 bytes/sample (f32) ≈ 576 KB.
+  const PENDING_INBOUND_MAX_SECS = 3;
+  const PENDING_INBOUND_MAX_SAMPLES = PENDING_INBOUND_MAX_SECS * MIC_RATE;
+
   // --- Diagnostics object available immediately, before any risky hook. ---
   const diag = {
     installed: false,
@@ -49,6 +64,15 @@
     pcCount: 0,
     audioTrackCount: 0,
     micTrackCount: 0,
+    // Bound (informational — lets external checks avoid hardcoding MIC_RATE
+    // * seconds themselves) plus counters for frames/samples dropped from
+    // `pendingInbound` on overflow, and how much backlog was actually handed
+    // to the most recently created synthetic mic track.
+    pendingInboundMaxSamples: PENDING_INBOUND_MAX_SAMPLES,
+    droppedInboundFrames: 0,
+    droppedInboundSamples: 0,
+    lastMicHandoffFrames: 0,
+    lastMicHandoffSamples: 0,
     // The sample rate of the FIRST outbound AudioData chunk we observed.
     // For Daily/WebRTC tracks in Chrome this is typically 48000, but record
     // it so we can verify / detect mismatches against the pipecat side.
@@ -76,6 +100,28 @@
   // all live writers instead of only the most recent one.
   const micWriters = new Set();
   let pendingInbound = [];
+  // Running total of buffered audio in pendingInbound, in samples at
+  // MIC_RATE (kept alongside the array so the bound check doesn't have to
+  // re-sum numberOfFrames on every push).
+  let pendingInboundSamples = 0;
+
+  // Buffer an inbound frame while no mic track is live yet, dropping the
+  // oldest frames (and closing their AudioData — it holds audio memory
+  // outside the JS heap) once the buffered duration exceeds
+  // PENDING_INBOUND_MAX_SAMPLES. Drop-oldest keeps the *most recent* audio,
+  // which is what a late getUserMedia() call should hear (near-live), not a
+  // stale backlog.
+  function pushPendingInbound(frame) {
+    pendingInbound.push(frame);
+    pendingInboundSamples += frame.numberOfFrames;
+    while (pendingInboundSamples > PENDING_INBOUND_MAX_SAMPLES && pendingInbound.length > 0) {
+      const dropped = pendingInbound.shift();
+      pendingInboundSamples -= dropped.numberOfFrames;
+      diag.droppedInboundFrames++;
+      diag.droppedInboundSamples += dropped.numberOfFrames;
+      dropped.close();
+    }
+  }
 
   // AudioData is consumed by write(), so each additional writer gets a
   // clone. A failed write means the page stopped that track's generator —
@@ -129,7 +175,7 @@
         if (micWriters.size > 0) {
           writeToMicWriters(frame);
         } else {
-          pendingInbound.push(frame);
+          pushPendingInbound(frame);
         }
         diag.inboundChunks++;
       } catch (e) {
@@ -144,8 +190,11 @@
     const writer = generator.writable.getWriter();
     micWriters.add(writer);
     diag.micTrackCount = micWriters.size;
+    diag.lastMicHandoffFrames = pendingInbound.length;
+    diag.lastMicHandoffSamples = pendingInboundSamples;
     for (const f of pendingInbound) writer.write(f).catch(() => {});
     pendingInbound = [];
+    pendingInboundSamples = 0;
     console.log(TAG, 'created synthetic mic stream', { liveMicTracks: micWriters.size });
     return new MediaStream([generator]);
   }

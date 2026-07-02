@@ -49,11 +49,24 @@ def _download_file(url: str, dest: Path):
 
 
 def _ensure_model_files(model_path: Path, voices_path: Path):
-    """Download model files if they don't exist."""
+    """Download the Kokoro model files if they are not already cached.
+
+    Logs a parent-visible line before and after a first-run download so a long
+    startup wait is explainable from the server's stderr (see ``server.py``'s
+    readiness handshake).
+    """
+    needs_download = not model_path.exists() or not voices_path.exists()
+    if needs_download:
+        logger.info(
+            f"Kokoro model not cached — downloading (~300 MB) to {KOKORO_CACHE_DIR} on "
+            f"first run; this can take a while..."
+        )
     if not model_path.exists():
         _download_file(KOKORO_MODEL_URL, model_path)
     if not voices_path.exists():
         _download_file(KOKORO_VOICES_URL, voices_path)
+    if needs_download:
+        logger.info("Kokoro model download complete.")
 
 
 def language_to_kokoro_language(language: Language) -> str:

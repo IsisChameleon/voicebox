@@ -26,10 +26,16 @@ jobs:
           version: "latest"
 
       - name: Set up Python
-        run: uv python install 3.10
+        run: uv python install 3.11
 
       - name: Install development dependencies
         run: uv sync --group dev
+
+      - name: Run tests
+        run: uv run pytest
+
+      - name: Type check
+        run: uv run pyright src/
 
       - name: Build project
         run: uv build

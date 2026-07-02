@@ -21,12 +21,23 @@ import sys
 from loguru import logger
 from mcp.server.fastmcp import FastMCP
 
-from voicebox.agent_ipc import send_command, start_pipecat_process, stop_pipecat_process
+from voicebox.agent_ipc import (
+    send_command,
+    start_pipecat_process,
+    stop_pipecat_process,
+    wait_for_pipecat_ready,
+)
 from voicebox.browser_session import start_browser, stop_browser
 from voicebox.runner_args import BrowserShimRunnerArguments
+from voicebox.timeouts import ARM_ACK_DEADLINE_SECS, speak_parent_deadline
 
 logger.remove()
 logger.add(sys.stderr, level="DEBUG")
+
+# Generous ceiling for the audio child's readiness handshake: a first run has to
+# download Kokoro (~300 MB) and Whisper (~1.5 GB) before the child can serve
+# commands. Warm-cache starts return in well under a second.
+AUDIO_READY_TIMEOUT = 300.0
 
 # Create MCP server. Stateless + json_response per the MCP 2025-11-25 recommended
 # config for streamable-http servers — no session bookkeeping, no SSE.
@@ -88,6 +99,15 @@ async def start_browser_session(
     MCP-driven Claude can play the role of the user in any browser-based
     voice app — without the app being aware of the indirection.
 
+    Returns only once BOTH children are ready: the browser page has loaded and
+    the pipecat audio child has completed its readiness handshake (transport
+    bound and STT/TTS constructed, which on a first run includes downloading the
+    Kokoro and Whisper models — watch the server's stderr for progress). A
+    startup failure in the audio child surfaces here with the child's exception
+    text; a readiness timeout names the likely first-run model download. On any
+    failure both children are torn down, so no orphan process or bound port is
+    left behind.
+
     The returned ``attach_hint`` is the exact shell command to paste to wire
     up ``playwright-cli``. Two env vars are required together — omitting either
     silently breaks attach:
@@ -136,9 +156,16 @@ async def start_browser_session(
     _assert_port_free(audio_port, "audio_port")
     _assert_port_free(cdp_port, "cdp_port")
     audio_ws_url = f"ws://localhost:{audio_port}"
+
+    # Spawn the audio child first: it returns immediately and the child loads
+    # its models in the background while the browser launches, so the two
+    # children come up concurrently. Readiness is armed synchronously inside
+    # start_pipecat_process, so the handshake can't be missed.
     start_pipecat_process(
         BrowserShimRunnerArguments(host="localhost", port=audio_port, record_dir=record_dir)
     )
+
+    # Browser first (fast, ~seconds): on failure, reap the audio child.
     try:
         info = await asyncio.to_thread(
             start_browser,
@@ -151,6 +178,21 @@ async def start_browser_session(
     except Exception:
         stop_pipecat_process()
         raise
+
+    # Then block on the audio child's readiness handshake (may already be
+    # resolved by now on a warm cache). On startup error / timeout, tear down
+    # both children so no orphan is left and the ports are released.
+    logger.info("Waiting for the voice agent to become ready (first run downloads models)...")
+    try:
+        await wait_for_pipecat_ready(AUDIO_READY_TIMEOUT)
+    except Exception:
+        stop_pipecat_process()
+        try:
+            await asyncio.to_thread(stop_browser)
+        except Exception as e:
+            logger.warning(f"stop_browser during readiness-failure cleanup failed: {e}")
+        raise
+    logger.info("Voice agent ready.")
     return info
 
 
@@ -182,6 +224,14 @@ async def listen(timeout: float = 30.0, cursor: int = 0) -> dict:
         finishing / being cut off at playout.
       * ``tester_transcript`` — the exact text WE spoke (``text``); the
         ground-truth ``speak()`` input, emitted at speak time (not via STT).
+        Only ever emitted when the speech is actually queued to a connected
+        client, so it never records speech that didn't physically happen.
+      * ``tester_barge_in_armed`` / ``tester_barge_in_fired`` — a one-shot
+        ``speak(when=...)`` trigger was armed / fired and is about to speak.
+      * ``tester_barge_in_dropped`` — an armed trigger reached its fire moment
+        but no client was connected within the grace period, so the utterance
+        was dropped (no speech) instead of queued into a dead transport;
+        carries ``when``, ``triggered_by_t`` and ``reason``.
 
     To simply wait for the next thing the app bot says: call in a loop with
     the advancing cursor and act on ``app_bot_transcript`` events.
@@ -217,6 +267,13 @@ async def speak(
     ``wait_for_turn`` and ``when`` control WHEN we start speaking;
     ``wait_for_playout`` controls WHEN this call returns. They are independent.
 
+    Requires a connected browser client. If none is connected (e.g. the page
+    reloaded, or never called getUserMedia), the call waits a short grace period
+    for a reconnection and then fails with an error naming the situation rather
+    than silently losing the audio — and no ``tester_transcript`` is logged for
+    a refused speak. Every internal wait gives up before this call's deadline, so
+    a ``speak`` that returns an error never later produces audio.
+
     Args:
         text: The text to speak.
         wait_for_playout: When false (default), returns as soon as the speech is
@@ -242,12 +299,15 @@ async def speak(
         plus the playout timing fields when ``wait_for_playout`` is true.
 
     """
+    # Deadlines derive from the child's per-wait budgets (voicebox.timeouts) so
+    # the child always gives up strictly before the parent — no ghost speech
+    # (finding F4), and no two magic numbers that can drift.
     if when is not None:
-        deadline = 60.0  # armed, returns immediately
-    elif wait_for_playout or wait_for_turn:
-        deadline = 150.0
+        deadline = ARM_ACK_DEADLINE_SECS  # armed, returns immediately
     else:
-        deadline = 60.0
+        deadline = speak_parent_deadline(
+            wait_for_turn=wait_for_turn, wait_for_playout=wait_for_playout
+        )
     return await send_command(
         "speak",
         text=text,
