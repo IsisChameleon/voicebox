@@ -678,8 +678,14 @@ class PipecatMCPAgent:
             return WhisperSTTServiceMLX(
                 settings=WhisperSTTServiceMLX.Settings(model="mlx-community/whisper-large-v3-turbo")
             )
+        # device="cpu" is pinned, not left at pipecat's "auto": auto-detect picks CUDA
+        # whenever a GPU is visible, and then faster-whisper needs libcublas/libcudnn,
+        # which we deliberately don't depend on. CPU keeps the install API-key- and
+        # CUDA-free at the cost of slower transcription.
         return WhisperSTTService(
-            settings=WhisperSTTService.Settings(model="Systran/faster-distil-whisper-large-v3")
+            settings=WhisperSTTService.Settings(model="Systran/faster-distil-whisper-large-v3"),
+            device="cpu",
+            compute_type="int8",
         )
 
     def _create_tts_service(self) -> TTSService:

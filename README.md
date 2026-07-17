@@ -39,6 +39,14 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox ────multiprocessing.Queue�
 
 By default the agent uses local models — Whisper for STT, Kokoro for TTS — so no API keys are needed.
 
+**Whisper runs on the CPU.** On non-Apple platforms voicebox pins faster-whisper to `device="cpu"`,
+`compute_type="int8"` rather than letting it auto-detect a GPU. Auto-detect selects CUDA whenever a
+GPU is visible and then fails to load `libcublas.so.12` / cuDNN, which voicebox intentionally does
+not depend on — keeping the install CUDA-free is worth the slower transcription for a synthetic
+tester. On Apple Silicon, Whisper-MLX is used instead and runs on the GPU. If you want CUDA, install
+`nvidia-cublas-cu12` + `nvidia-cudnn-cu12` yourself and change `_create_stt_service` in
+`src/voicebox/agent.py`.
+
 ## Install
 
 ```bash
