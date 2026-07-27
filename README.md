@@ -80,10 +80,69 @@ Cursor (`~/.cursor/mcp.json`):
 
 | Tool | Purpose |
 |---|---|
-| `start_browser_session(url, headless?, cdp_port?, audio_port?, user_data_dir?)` | Launch a Playwright Chromium with the audio shim injected, navigate to `url`, expose CDP. The shim hijacks the page's mic (fed by Kokoro) and tees the page's WebRTC remote audio into Whisper. Returns `{cdp_endpoint, audio_ws_url}`. Drive the UI with any Playwright client that can attach over CDP (see below). Pass `user_data_dir` (a persistent Chrome profile) to reuse an authenticated session: log in once and stay logged in on later runs with the same dir. |
-| `speak(text)` | Synthesize `text` with Kokoro TTS and stream it into the shim's synthetic mic. Returns when frames are queued — not when audio has finished playing. |
-| `listen(timeout=30)` | Block until the other side completes an utterance (VAD-segmented). Returns the transcribed text, or `""` on timeout. A long reply produces multiple utterances; call `listen()` in a loop. |
-| `stop()` | Tear down the pipecat agent and close the Chromium session. |
+| `start_browser_session(url, headless?, cdp_port?, audio_port?, user_data_dir?, record_dir?)` | Launch a Playwright Chromium with the audio shim injected, navigate to `url`, expose CDP. The shim hijacks the page's mic (fed by Kokoro) and tees the page's WebRTC remote audio into Whisper. Returns `{cdp_endpoint, audio_ws_url, playwright_mcp_env, attach_hint}`. Drive the UI with any Playwright client that can attach over CDP (see below). Pass `user_data_dir` (a persistent Chrome profile) to reuse an authenticated session: log in once and stay logged in on later runs with the same dir. Pass `record_dir` to have `stop()` write the session artifacts (see below). |
+| `speak(text, wait_for_playout?, wait_for_turn?, when?, timer_secs?)` | Synthesize `text` with Kokoro TTS and stream it into the shim's synthetic mic. Returns `{queued: true}` as soon as frames are queued, not when audio has finished playing. `wait_for_playout` instead returns after our own audio finishes, with `started_at` / `finished_at` / `interrupted`. `wait_for_turn` waits for the app bot to fall silent first (the polite path). `when` / `timer_secs` arm a barge-in trigger and return `{armed: true}` (see below). |
+| `listen(timeout=30, cursor=0)` | Block until at least one event exists past `cursor`, then return `{events, cursor}` covering everything from `cursor` onward. Pass the returned `cursor` to the next call to resume without missing or re-reading anything; `cursor=0` replays the whole session. `events` is empty on timeout. |
+| `stop()` | Tear down the pipecat agent and close the Chromium session. Returns `{stopped: true}`, plus `artifacts` (absolute paths) when the session ran with `record_dir`. |
+
+The IPC between the MCP server and the pipecat child is full-duplex: every command
+carries a correlation id and runs as its own task, so a `speak` issued while a
+`listen` is still blocked executes immediately. That is what makes talking over
+the bot possible at all.
+
+### Conversation events
+
+`listen()` returns a monotonic, timestamped event log rather than a transcript
+string. Two parties: `app_bot` is the app's voice agent under test, `tester` is
+our synthetic human. Every event carries `t` (wall-clock seconds).
+
+| Event | Meaning |
+|---|---|
+| `session_started` | Log header; carries `vad_stop_secs`. |
+| `session_stopped` | The session is tearing down; a pending `listen()` returns this instead of being cancelled. |
+| `client_connected` / `client_disconnected` | The in-page audio link came up / dropped. A drop is a status event, not speech. |
+| `app_bot_speech_started` / `app_bot_speech_stopped` | The app bot's voice activity. `app_bot_speech_stopped.t` lands about `vad_stop_secs` (~1 s) after it truly stopped talking. |
+| `app_bot_transcript` | A finished app-bot utterance: `text` plus `turn_started_at`. Arrives after the matching `app_bot_speech_stopped` (batch STT). |
+| `tester_speech_started` / `tester_speech_stopped` / `tester_speech_interrupted` | Our synthetic voice starting / finishing / being cut off at playout. |
+| `tester_transcript` | The exact text we spoke: ground-truth `speak()` input, not STT. |
+| `tester_barge_in_armed` / `tester_barge_in_fired` | A `when` trigger was armed / fired. |
+
+To wait for the next thing the app bot says, call `listen()` in a loop with the
+advancing cursor and act on `app_bot_transcript`.
+
+### Barge-in
+
+We never interrupt the bot directly: it is a black box reached only through its
+microphone. Barge-in means timing our own speech relative to the bot's and then
+reading its reaction out of the event log.
+
+```jsonc
+// arm a one-shot trigger: next time the bot starts talking, wait 1.5 s, then speak
+{"name": "speak", "arguments": {"text": "wait, go back",
+                                "when": "app_bot_speech_started",
+                                "timer_secs": 1.5}}
+// → {"armed": true}   (returns immediately; the trigger fires in the audio child)
+```
+
+`when` takes any event type from the table above. The trigger is armed at call
+time and reacts only to the next occurrence after arming, so the moment is picked
+at audio rate with no LLM in the hot path, which makes it reproducible.
+`when` and `wait_for_turn` are mutually exclusive.
+
+### Session artifacts
+
+Pass `record_dir` to `start_browser_session` and `stop()` writes a reviewable
+report there, returning the absolute paths:
+
+| Artifact | Contents |
+|---|---|
+| `merged.wav` | Stereo: tester on the left channel, app bot on the right (EVA's convention). |
+| `kokoro_voice.wav` / `ember_voice.wav` | The same two sides as mono files. |
+| `events.json` | The full event log, the same objects `listen()` returns. |
+| `metrics.json` | Computed report: `session` (span plus `biases` for reading the numbers correctly), `turns` (per-turn transcript, app-bot turns carry `response_latency_secs`), `app_response_latencies_secs`, `talk_over_windows`, `dead_air_gaps`, `talk_time`, `utterances`, `summary`. |
+
+The `biases` block matters: `app_bot_speech_stopped` is late by `vad_stop_secs`,
+so subtract it before quoting any latency number.
 
 ### Example session
 
@@ -109,7 +168,11 @@ Cursor (`~/.cursor/mcp.json`):
 
 // 4. listen — the bot's remote audio track is teed to Whisper via the shim
 {"name": "listen", "arguments": {"timeout": 45}}
-// → "Hello, welcome. I'm so excited to have you..."
+// → {"events": [{"type": "app_bot_speech_started", "t": 1712.44},
+//               {"type": "app_bot_transcript", "t": 1715.01,
+//                "text": "Hello, welcome. I'm so excited to have you..."}],
+//    "cursor": 7}
+//    pass cursor: 7 to the next listen() to pick up where this left off
 
 // 5. end the call either by saying "goodbye" (if the bot supports
 //    UserVerballyInitiatedDisconnect), or click the End-call button via
@@ -174,8 +237,10 @@ login → navigate → call → conversation → end against the readme app.
                                    over the WS → shim writes AudioData chunks into the
                                    MediaStreamTrackGenerator → the page's WebRTC peer encodes Opus
 8.  [Claude] listen()              VAD/SmartTurn waits for the bot's utterance to end →
-                                   Whisper transcript returned to MCP
-9.  [Claude] stop()                terminates pipecat child + browser child
+                                   Whisper transcript appended to the event log →
+                                   events past the cursor returned to MCP
+9.  [Claude] stop()                flushes artifacts (if record_dir), then terminates
+                                   pipecat child + browser child
 ```
 
 ### Tradeoffs and known sharp edges
