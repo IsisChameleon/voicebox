@@ -41,6 +41,7 @@ dev = [
     "pip-tools~=7.4.1",
     "pyright>=1.1.404,<1.2",
     "pytest>=8,<9",
+    "pytest-asyncio>=0.24,<2",
     "ruff>=0.12.11,<1",
     "setuptools~=78.1.1",
     "setuptools_scm~=8.3.1",
@@ -77,3 +78,4 @@ ignore = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
