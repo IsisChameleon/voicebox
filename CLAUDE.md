@@ -100,34 +100,18 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
 ## Driving the UI from another agent
 
 `start_browser_session` returns `attach_hint` — paste it verbatim to wire up
-`playwright-cli`. Two env vars are required **together**:
+`playwright-cli`:
 
 ```bash
-playwright-cli close-all && \
-  PLAYWRIGHT_MCP_CDP_ENDPOINT=http://localhost:9222 \
-  PLAYWRIGHT_MCP_ISOLATED=false \
-  playwright-cli
+playwright-cli attach --cdp http://localhost:9222
 ```
 
-**Why both vars are needed (verified from playwright-core source):**
-
-- `PLAYWRIGHT_MCP_CDP_ENDPOINT` — tells the client to attach to voicebox's
-  Chromium rather than launching its own browser.
-- `PLAYWRIGHT_MCP_ISOLATED=false` — without this, `playwright-cli` defaults
-  `isolated=true` even when a CDP endpoint is set. The decision point is in
-  `playwright-core/lib/tools/mcp/index.js`:
-  ```js
-  const context = config.browser.isolated
-    ? await browser.newContext(...)   // fresh, unauthenticated
-    : browser.contexts()[0];          // the existing voicebox tab ✓
-  ```
-  `isolated` is not cleared by setting `cdpEndpoint` — it must be explicitly
-  set to `false`. (`playwright-core/lib/tools/mcp/config.js:290` and
-  `config.js:115-116` for the default logic.)
-
-**The `close-all` step is mandatory** when a daemon already exists for the
-session name. Reusing an existing daemon ignores env vars entirely — the new
-config never takes effect.
+**Why `attach` and not `open` (verified from playwright-core source):**
+`playwright-cli open` with no URL runs `goto about:blank` on the current page
+(`playwright-core/lib/tools/cli-client/program.js:128`) — over CDP that is
+voicebox's shim tab, and blanking it destroys the audio shim. `attach` only
+takes a `snapshot` (same file, the `case "attach"` branch) and navigates
+nowhere.
 
 **Do not open new tabs.** The audio shim (`shim.js`) is page-scoped to the
 voicebox-owned tab. A second tab connecting to WS :9091 triggers pipecat's

@@ -13,21 +13,25 @@ by ``BrowserShimRunnerArguments``.
 
 Chromium is exposed on CDP port ``cdp_port`` so an external Playwright
 client can attach via ``chromium.connect_over_cdp("http://localhost:<cdp_port>")``
-or via ``@playwright/mcp`` with ``PLAYWRIGHT_MCP_CDP_ENDPOINT=http://localhost:<cdp_port>``
-set before opening a session (env var wins over ``--config`` because the daemon
-must be started fresh — reusing an existing daemon ignores the config).
+or via ``playwright-cli attach --cdp http://localhost:<cdp_port>`` — ``attach``
+takes a snapshot and performs no navigation, so it leaves the shim tab intact.
 """
 
 import multiprocessing
 from pathlib import Path
+from queue import Empty
 from typing import Optional
 
 from loguru import logger
 
 SHIM_PATH = Path(__file__).parent / "shim.js"
 
+# How long the child waits for the page to navigate and the shim to install
+# itself before it reports startup failure to the parent.
+SHIM_READY_TIMEOUT_SECS = 10.0
+
 _browser_process: Optional[multiprocessing.Process] = None
-_ready_event: Optional[multiprocessing.Event] = None
+_startup_queue: Optional[multiprocessing.Queue] = None
 _stop_event: Optional[multiprocessing.Event] = None
 
 
@@ -48,12 +52,18 @@ def start_browser(
 
     Returns a dict with ``cdp_endpoint`` (HTTP URL for ``connect_over_cdp``)
     and ``audio_ws_url``.
+
+    Raises:
+        RuntimeError: if the page did not navigate or the shim did not install —
+            the child's error text is included. A browser sitting on
+            ``about:blank`` is never reported as a started session.
+
     """
-    global _browser_process, _ready_event, _stop_event
+    global _browser_process, _startup_queue, _stop_event
 
     stop_browser()
 
-    _ready_event = multiprocessing.Event()
+    _startup_queue = multiprocessing.Queue()
     _stop_event = multiprocessing.Event()
     _browser_process = multiprocessing.Process(
         target=_run_browser,
@@ -63,29 +73,34 @@ def start_browser(
             cdp_port,
             headless,
             user_data_dir,
-            _ready_event,
+            _startup_queue,
             _stop_event,
         ),
     )
     _browser_process.start()
     logger.debug(f"Browser child process PID {_browser_process.ident}")
 
-    if not _ready_event.wait(timeout=startup_timeout):
+    try:
+        result = _startup_queue.get(timeout=startup_timeout)
+    except Empty:
         stop_browser()
-        raise RuntimeError(f"Browser failed to become ready within {startup_timeout}s")
+        raise RuntimeError(f"Browser failed to become ready within {startup_timeout}s") from None
+
+    if not result.get("ok"):
+        stop_browser()
+        raise RuntimeError(f"Browser session startup failed: {result.get('error')}")
 
     cdp_endpoint = f"http://localhost:{cdp_port}"
     return {
         "cdp_endpoint": cdp_endpoint,
         "audio_ws_url": audio_ws_url,
-        "playwright_mcp_env": f"PLAYWRIGHT_MCP_CDP_ENDPOINT={cdp_endpoint} PLAYWRIGHT_MCP_ISOLATED=false",
-        "attach_hint": f"playwright-cli close-all && PLAYWRIGHT_MCP_CDP_ENDPOINT={cdp_endpoint} PLAYWRIGHT_MCP_ISOLATED=false playwright-cli",
+        "attach_hint": f"playwright-cli attach --cdp {cdp_endpoint}",
     }
 
 
 def stop_browser():
     """Tear down the Playwright-controlled Chromium, if running."""
-    global _browser_process, _ready_event, _stop_event
+    global _browser_process, _startup_queue, _stop_event
 
     if _stop_event is not None:
         _stop_event.set()
@@ -103,7 +118,9 @@ def stop_browser():
                 _browser_process.join(timeout=5.0)
         _browser_process = None
 
-    _ready_event = None
+    if _startup_queue is not None:
+        _startup_queue.close()
+        _startup_queue = None
     _stop_event = None
 
 
@@ -113,7 +130,7 @@ def _run_browser(
     cdp_port: int,
     headless: bool,
     user_data_dir: Optional[str],
-    ready_event,
+    startup_queue,
     stop_event,
 ):
     """Child-process entry. Runs the asyncio loop with Playwright."""
@@ -126,10 +143,41 @@ def _run_browser(
             cdp_port,
             headless,
             user_data_dir,
-            ready_event,
+            startup_queue,
             stop_event,
         )
     )
+
+
+async def _wait_for_shim(page, timeout: float):
+    """Poll until the page has navigated away from ``about:blank`` and the shim installed.
+
+    Args:
+        page: The Playwright page the shim was injected into.
+        timeout: Seconds to poll before giving up.
+
+    Raises:
+        RuntimeError: if either condition is still unmet when the timeout expires.
+
+    """
+    import asyncio
+    import time
+
+    probe = "() => !!(window.__voiceShim && window.__voiceShim.installed)"
+    deadline = time.monotonic() + timeout
+    state = "not polled"
+    while time.monotonic() < deadline:
+        try:
+            installed = await page.evaluate(probe)
+        except Exception as e:
+            # A navigation in flight destroys the execution context; keep polling.
+            installed = False
+            logger.debug(f"shim probe failed, retrying: {e}")
+        if page.url != "about:blank" and installed:
+            return
+        state = f"url={page.url!r}, shim installed={installed}"
+        await asyncio.sleep(0.2)
+    raise RuntimeError(f"page did not become ready within {timeout}s ({state})")
 
 
 async def _run_browser_async(
@@ -138,7 +186,7 @@ async def _run_browser_async(
     cdp_port: int,
     headless: bool,
     user_data_dir: Optional[str],
-    ready_event,
+    startup_queue,
     stop_event,
 ):
     import asyncio
@@ -179,14 +227,19 @@ async def _run_browser_async(
         await page.add_init_script(init_script)
 
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-        except Exception as e:
-            logger.error(f"page.goto failed: {e}")
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                await _wait_for_shim(page, timeout=SHIM_READY_TIMEOUT_SECS)
+            except Exception as e:
+                # The parent must not be told a session started when the page
+                # never navigated — a blank tab wastes the caller's whole run.
+                logger.error(f"Browser startup failed for {url}: {e}")
+                startup_queue.put({"ok": False, "error": str(e)})
+                return
 
-        logger.info(f"Browser ready. CDP: http://localhost:{cdp_port} | audio: {audio_ws_url}")
-        ready_event.set()
+            logger.info(f"Browser ready. CDP: http://localhost:{cdp_port} | audio: {audio_ws_url}")
+            startup_queue.put({"ok": True})
 
-        try:
             # Park here until parent asks us to stop or the browser dies.
             while not stop_event.is_set():
                 await asyncio.sleep(0.5)
