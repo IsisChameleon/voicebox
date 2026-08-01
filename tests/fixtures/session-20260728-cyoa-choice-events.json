@@ -1,0 +1,215 @@
+[
+  {
+    "type": "session_started",
+    "t": 1785206092.7402618,
+    "vad_stop_secs": 1.0,
+    "note": "app_bot_speech_stopped.t lands ~vad_stop_secs after true speech end; app_bot_transcript arrives later still (batch STT)"
+  },
+  {
+    "type": "client_connected",
+    "t": 1785206093.7395103
+  },
+  {
+    "type": "app_bot_speech_started",
+    "t": 1785206173.249123
+  },
+  {
+    "type": "app_bot_speech_stopped",
+    "t": 1785206178.7385259
+  },
+  {
+    "type": "app_bot_transcript",
+    "t": 1785206203.044149,
+    "text": "here. We're going to have a wonderful time reading together today. Are you ready?",
+    "turn_started_at": "2026-07-28T02:36:42.921+00:00"
+  },
+  {
+    "type": "app_bot_speech_started",
+    "t": 1785206203.4313433
+  },
+  {
+    "type": "app_bot_speech_stopped",
+    "t": 1785206204.3607433
+  },
+  {
+    "type": "tester_transcript",
+    "t": 1785206251.4716733,
+    "text": "Yes please. I want to take the tunnel leading to the left."
+  },
+  {
+    "type": "app_bot_speech_started",
+    "t": 1785206226.073364
+  },
+  {
+    "type": "app_bot_speech_stopped",
+    "t": 1785206230.6708727
+  },
+  {
+    "type": "app_bot_transcript",
+    "t": 1785206262.3144855,
+    "text": "your adventure?   Thank you.",
+    "turn_started_at": "2026-07-28T02:37:42.311+00:00"
+  },
+  {
+    "type": "tester_speech_started",
+    "t": 1785206263.8121698
+  },
+  {
+    "type": "tester_speech_stopped",
+    "t": 1785206264.6554189
+  },
+  {
+    "type": "tester_speech_started",
+    "t": 1785206266.2859852
+  },
+  {
+    "type": "tester_speech_stopped",
+    "t": 1785206268.4475422
+  },
+  {
+    "type": "app_bot_speech_started",
+    "t": 1785206271.5323553
+  },
+  {
+    "type": "app_bot_speech_stopped",
+    "t": 1785206275.5432937
+  },
+  {
+    "type": "app_bot_transcript",
+    "t": 1785206298.912154,
+    "text": "The tunnel to the left winds around like a spiral.  Past the left,",
+    "turn_started_at": "2026-07-28T02:38:18.761+00:00"
+  },
+  {
+    "type": "app_bot_speech_started",
+    "t": 1785206299.0306554
+  },
+  {
+    "type": "app_bot_speech_stopped",
+    "t": 1785206307.9644017
+  },
+  {
+    "type": "app_bot_speech_started",
+    "t": 1785206308.0275204
+  },
+  {
+    "type": "app_bot_speech_stopped",
+    "t": 1785206369.551974
+  },
+  {
+    "type": "tester_transcript",
+    "t": 1785206446.0019033,
+    "text": "Wait, can we go back to that choice? I want to take the other tunnel instead."
+  },
+  {
+    "type": "app_bot_transcript",
+    "t": 1785206446.1086485,
+    "text": "Yet are bare of snow.  You have no idea whether you are in the past, the future, or the present.  Then you see something that fascinating.",
+    "turn_started_at": "2026-07-28T02:38:24.421+00:00"
+  },
+  {
+    "type": "app_bot_speech_started",
+    "t": 1785206447.9559174
+  },
+  {
+    "type": "app_bot_speech_stopped",
+    "t": 1785206455.6276278
+  },
+  {
+    "type": "app_bot_transcript",
+    "t": 1785206494.9387949,
+    "text": "and disturbs you. The sand seems to be fused into yellowish glass, as if heated in a furnace.  As you examine the sand more closely, you feel the air getting even hotter. Suddenly, you realize  the sun is not setting, but rising. The noontime temperature must be more than life can. Stand.  As the sun rises higher, you feel a blistering wave of heat. The light is almost blinding.  Could it be that you are witnessing the end of the world?  You dive down into the tunnel, hoping you can make it back to an earlier time.  Gratefully, you feel cool, damp air coming up from the cave.  You are.  Curious to try the next tunnel you come to, thinking that it may show the state of the world just before it began to bum up from the intensifying heat of the dying sun,  or that it might show what happened afterward.  But you suspect that a tunnel  further on might be more likely to lead you back to your own time.   Thank you.",
+    "turn_started_at": "2026-07-28T02:41:34.931+00:00"
+  },
+  {
+    "type": "tester_speech_started",
+    "t": 1785206497.294485
+  },
+  {
+    "type": "tester_speech_stopped",
+    "t": 1785206499.1776862
+  },
+  {
+    "type": "tester_speech_started",
+    "t": 1785206499.8631034
+  },
+  {
+    "type": "tester_transcript",
+    "t": 1785206500.410479,
+    "text": "Wait, can we go back to that choice? I want to take the other tunnel instead."
+  },
+  {
+    "type": "tester_speech_stopped",
+    "t": 1785206501.836577
+  },
+  {
+    "type": "tester_speech_started",
+    "t": 1785206502.6357906
+  },
+  {
+    "type": "tester_speech_stopped",
+    "t": 1785206504.5183442
+  },
+  {
+    "type": "tester_speech_started",
+    "t": 1785206505.1001582
+  },
+  {
+    "type": "tester_speech_stopped",
+    "t": 1785206507.0680888
+  },
+  {
+    "type": "app_bot_speech_started",
+    "t": 1785206511.6929665
+  },
+  {
+    "type": "app_bot_speech_stopped",
+    "t": 1785206512.9847417
+  },
+  {
+    "type": "app_bot_transcript",
+    "t": 1785206537.051139,
+    "text": "Of course.",
+    "turn_started_at": "2026-07-28T02:42:16.924+00:00"
+  },
+  {
+    "type": "app_bot_speech_started",
+    "t": 1785206537.5829623
+  },
+  {
+    "type": "app_bot_speech_stopped",
+    "t": 1785206537.7928286
+  },
+  {
+    "type": "app_bot_speech_started",
+    "t": 1785206559.5288954
+  },
+  {
+    "type": "app_bot_speech_stopped",
+    "t": 1785206560.3441434
+  },
+  {
+    "type": "app_bot_speech_started",
+    "t": 1785206581.7111623
+  },
+  {
+    "type": "app_bot_speech_stopped",
+    "t": 1785206584.8159797
+  },
+  {
+    "type": "app_bot_transcript",
+    "t": 1785206622.8638062,
+    "text": "time.   Thank you.",
+    "turn_started_at": "2026-07-28T02:43:42.861+00:00"
+  },
+  {
+    "type": "app_bot_transcript",
+    "t": 1785206622.8664432,
+    "text": "Thank you.",
+    "turn_started_at": "2026-07-28T02:43:42.864+00:00"
+  },
+  {
+    "type": "session_stopped",
+    "t": 1785206663.4977214
+  }
+]

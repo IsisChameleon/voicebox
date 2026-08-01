@@ -34,13 +34,14 @@ def compute_metrics(events: list[dict], vad_stop_secs: float) -> dict:
     talk_over = _overlaps(tester_intervals, app_intervals)
     total_talk_over = round(sum(w["duration_secs"] for w in talk_over), 3)
 
-    dead_air = _gaps(tester_intervals + app_intervals)
+    dead_air, think_time = _gaps(tester_intervals, app_intervals)
     total_dead_air = round(sum(g["duration_secs"] for g in dead_air), 3)
+    total_think_time = round(sum(g["duration_secs"] for g in think_time), 3)
 
     tester_secs = round(sum(stop - start for start, stop in tester_intervals), 3)
     app_bot_secs = round(sum(stop - start for start, stop in app_intervals), 3)
 
-    turns = _turns(events, app_intervals, app_latencies)
+    turns = _turns(events, app_intervals, app_latencies, tester_intervals)
     session = _session_header(events, vad_stop_secs)
 
     return {
@@ -49,6 +50,7 @@ def compute_metrics(events: list[dict], vad_stop_secs: float) -> dict:
         "app_response_latencies_secs": latencies,
         "talk_over_windows": talk_over,
         "dead_air_gaps": dead_air,
+        "tester_think_time_gaps": think_time,
         "talk_time": {
             "tester_secs": tester_secs,
             "app_bot_secs": app_bot_secs,
@@ -64,6 +66,7 @@ def compute_metrics(events: list[dict], vad_stop_secs: float) -> dict:
             "max_app_response_latency_secs": max(latencies) if latencies else None,
             "total_talk_over_secs": total_talk_over,
             "total_dead_air_secs": total_dead_air,
+            "total_tester_think_time_secs": total_think_time,
         },
     }
 
@@ -153,7 +156,21 @@ def _overlaps(a: list[tuple[float, float]], b: list[tuple[float, float]]) -> lis
 
 _BIAS_NOTES = [
     "app_bot_speech_stopped trails true speech end by ~vad_stop_secs, so app-bot "
-    "talk time and the dead-air gap after a bot turn are overestimated by ~that much.",
+    "talk time is overestimated by ~that much and the tester think-time gap that "
+    "follows a bot turn is understated by ~that much.",
+    "dead_air_gaps / total_dead_air_secs count ONLY the silence that follows a "
+    "tester utterance — the app owing a reply. Silence following an app utterance "
+    "is in tester_think_time_gaps: it is how long the driving agent took to call "
+    "speak() again, not an app defect. Neither field says WHY a silence happened, "
+    "and a gap is attributed to whoever's speech ends furthest right when the two "
+    "parties overlap.",
+    "turns come one-per-speech-interval, so an utterance still appears when its "
+    "transcript never arrived (flagged transcript_missing, no text key). Text is "
+    "matched to intervals by arrival order, not by content: an app transcript "
+    "goes to the earliest unmatched interval that had already finished when it "
+    "arrived; a tester transcript to the earliest unmatched interval starting at "
+    "or after its speak() call. A dropped or out-of-order transcript therefore "
+    "shifts text onto a neighbouring turn.",
     "app_response_latency_secs measures the user-perceived wait (tester speech end "
     "to app speech start): the app's endpointing + STT/LLM/TTS think time, not pure "
     "server compute. tester_speech_stopped is playout-accurate; app_bot_speech_started "
@@ -180,42 +197,124 @@ def _session_header(events: list[dict], vad_stop_secs: float) -> dict:
     }
 
 
+def _spoken_transcripts(events: list[dict], event_type: str) -> list[dict]:
+    """Transcript events of one type that actually carry text, in log order.
+
+    An empty ``text`` means STT ran and recovered nothing. That is not a
+    transcript for matching purposes — the interval it belongs to is still
+    reported as ``transcript_missing``.
+    """
+    return [e for e in events if e["type"] == event_type and e.get("text")]
+
+
+def _match_app_transcripts(
+    intervals: list[tuple[float, float]], transcripts: list[dict]
+) -> list[dict | None]:
+    """Pair each app speech interval with the transcript that reports it.
+
+    Batch STT emits transcripts in segment order, well after the speech ended,
+    so a transcript is claimed by the earliest still-unclaimed interval that
+    had already finished when the transcript arrived. An interval nothing
+    claims keeps ``None``: its transcript never arrived.
+    """
+    matched: list[dict | None] = [None] * len(intervals)
+    next_unclaimed = 0
+    for transcript in transcripts:
+        if next_unclaimed >= len(intervals):
+            break
+        if intervals[next_unclaimed][1] > transcript["t"]:
+            continue  # nothing had finished yet; a later transcript may claim it
+        matched[next_unclaimed] = transcript
+        next_unclaimed += 1
+    return matched
+
+
+def _match_tester_transcripts(
+    intervals: list[tuple[float, float]], transcripts: list[dict]
+) -> list[dict | None]:
+    """Pair each tester speech interval with the ``speak()`` text behind it.
+
+    ``tester_transcript`` is ground truth stamped at ``speak()`` time, so its
+    playout cannot be an interval that had already ended: a transcript is
+    claimed by the earliest still-unclaimed interval ending at or after it.
+    One ``speak()`` whose playout fragments into several intervals therefore
+    labels only the first of them.
+    """
+    matched: list[dict | None] = [None] * len(intervals)
+    next_unclaimed = 0
+    for transcript in transcripts:
+        while next_unclaimed < len(intervals) and intervals[next_unclaimed][1] < transcript["t"]:
+            next_unclaimed += 1  # already over when speak() ran: no transcript can claim it
+        if next_unclaimed >= len(intervals):
+            break
+        matched[next_unclaimed] = transcript
+        next_unclaimed += 1
+    return matched
+
+
+def _turn(speaker: str, start: float, transcript: dict | None) -> dict:
+    """One turn row, stamped at the speech interval's start."""
+    if transcript is None:
+        return {"speaker": speaker, "t": start, "transcript_missing": True}
+    return {"speaker": speaker, "t": start, "text": transcript["text"]}
+
+
 def _turns(
     events: list[dict],
     app_intervals: list[tuple[float, float]],
     app_latencies: list[float | None],
+    tester_intervals: list[tuple[float, float]],
 ) -> list[dict]:
-    """Merge tester/app transcripts in time order; app turns carry their latency.
+    """One turn per speech interval, both speakers merged in time order.
 
-    An app transcript is associated with the app speech interval whose stop is
-    the latest at or before the transcript's ``t`` (batch STT arrives after the
-    speech), and inherits that interval's response latency.
+    Turns come from speech intervals rather than transcripts so the turn count
+    reconciles with ``utterances`` by construction, and so a missing transcript
+    cannot take a measured ``response_latency_secs`` down with it — the latency
+    rides on the app turn, not on its text.
     """
+    app_texts = _match_app_transcripts(
+        app_intervals, _spoken_transcripts(events, "app_bot_transcript")
+    )
+    tester_texts = _match_tester_transcripts(
+        tester_intervals, _spoken_transcripts(events, "tester_transcript")
+    )
+
     turns = []
-    for e in events:
-        if e["type"] == "tester_transcript":
-            turns.append({"speaker": "tester", "t": e["t"], "text": e["text"]})
-        elif e["type"] == "app_bot_transcript":
-            turn = {"speaker": "app_bot", "t": e["t"], "text": e["text"]}
-            matched = [i for i, (_s, stop) in enumerate(app_intervals) if stop <= e["t"]]
-            if matched:
-                latency = app_latencies[matched[-1]]
-                if latency is not None:
-                    turn["response_latency_secs"] = latency
-            turns.append(turn)
+    for (start, _stop), transcript, latency in zip(app_intervals, app_texts, app_latencies):
+        turn = _turn("app_bot", start, transcript)
+        if latency is not None:
+            turn["response_latency_secs"] = latency
+        turns.append(turn)
+    for (start, _stop), transcript in zip(tester_intervals, tester_texts):
+        turns.append(_turn("tester", start, transcript))
     turns.sort(key=lambda turn: turn["t"])
     return turns
 
 
-def _gaps(intervals: list[tuple[float, float]]) -> list[dict]:
-    """Silent spans between the merged union of all speech intervals."""
-    if not intervals:
-        return []
-    ordered = sorted(intervals)
-    gaps = []
-    cursor = ordered[0][1]
-    for start, stop in ordered[1:]:
+def _gaps(
+    tester_intervals: list[tuple[float, float]], app_intervals: list[tuple[float, float]]
+) -> tuple[list[dict], list[dict]]:
+    """Split the silent spans by who owed the next turn.
+
+    Returns ``(app_dead_air, tester_think_time)``. Silence after a tester
+    utterance is the app being slow to answer; silence after an app utterance
+    is the driving agent deciding what to say next. Overlapping speech is
+    merged as before, and the gap belongs to whoever's interval ends furthest
+    right.
+    """
+    ordered = sorted(
+        [(start, stop, "tester") for start, stop in tester_intervals]
+        + [(start, stop, "app_bot") for start, stop in app_intervals]
+    )
+    if not ordered:
+        return [], []
+    app_dead_air: list[dict] = []
+    tester_think_time: list[dict] = []
+    cursor, owed_by_app = ordered[0][1], ordered[0][2] == "tester"
+    for start, stop, speaker in ordered[1:]:
         if start > cursor:
-            gaps.append({"start": cursor, "end": start, "duration_secs": round(start - cursor, 3)})
-        cursor = max(cursor, stop)
-    return gaps
+            gap = {"start": cursor, "end": start, "duration_secs": round(start - cursor, 3)}
+            (app_dead_air if owed_by_app else tester_think_time).append(gap)
+        if stop > cursor:
+            cursor, owed_by_app = stop, speaker == "tester"
+    return app_dead_air, tester_think_time

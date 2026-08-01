@@ -14,7 +14,7 @@ Task breakdown and success criteria:
 | Task | What it fixes | Commits | Evidence | Done |
 |---|---|---|---|---|
 | **A** | Session startup fails loudly; `attach_hint` stops destroying the shim tab | `1df7e51` | [t-a-startup-fails-loudly.md](../artefacts/fix-audio-path-and-reporting/t-a-startup-fails-loudly.md) | ✅ |
-| **B** | `metrics.json` reconciles with itself (turns from intervals, split gap attribution) | — | — | ⬜ |
+| **B** | `metrics.json` reconciles with itself (turns from intervals, split gap attribution) | `ce3364f` | [t-b-metrics-reconcile.md](../artefacts/fix-audio-path-and-reporting/t-b-metrics-reconcile.md) | ✅ |
 | **C** | Phase-0 timing instrumentation; attributes the unexplained ~24 s per-turn lag | `d1ec4e9` | [t-c-timing-instrumentation.md](../artefacts/fix-audio-path-and-reporting/t-c-timing-instrumentation.md) | ✅ |
 | **D** | VAD moves upstream of the STT (90 % of speech was trimmed before Whisper) | — | — | ⬜ |
 | **E** | Transcription leaves the frame path (non-blocking Whisper worker) | — | — | ⬜ |
@@ -81,4 +81,37 @@ by name instead of guessing.
 does, the Task D follow-up (dropping `TurnAnalyzerUserTurnStopStrategy`) stays unjustified.
 `on_user_turn_stopped` is instrumented but untested. Full list in the evidence artefact.
 
-## Task B — *(in flight, not committed)*
+---
+
+## Task B — `metrics.json` reconciles with itself
+
+*Commit `ce3364f`. Criteria: execution spec § "Task B". Decision: `BUILDLOG.md` D2.*
+
+- `_turns()` (`metrics.py:262-289`) is built from **speech intervals**, not transcripts, so the
+  turn count equals `utterances` by construction. A turn nothing transcribed carries
+  `transcript_missing: true` and no `text` key.
+- `response_latency_secs` now rides on the app-bot **turn** rather than on its transcript, so a
+  measured latency survives when the text never arrives.
+- `_gaps()` (`metrics.py:292-318`) splits silence by who owed the next turn: after a tester
+  utterance it is **app dead air**, after an app utterance it is **tester think time**.
+  `total_dead_air_secs` keeps its name and means app dead air only — so its value changes.
+- Empty transcripts (`text: ""`) no longer count as transcripts for matching
+  (`_spoken_transcripts`, `metrics.py:200-207`); the interval is reported as `transcript_missing`.
+
+**What it was reporting before**, on the two captured dogfood logs — same input, old code:
+
+| | session 1 | session 2 |
+|---|---|---|
+| app-bot turns / utterances **before** | 2 / 3 | 8 / 11 |
+| app-bot turns / utterances **after** | 3 / 3 | 11 / 11 |
+| `total_dead_air_secs` **before** | 98.123 | 302.276 |
+| **after** (app dead air + tester think time) | 3.754 + 94.369 | 11.407 + 290.869 |
+
+The old dead-air figure read as "the app under test was silent for 98 seconds". Nearly all of it
+was the driving agent thinking between `speak()` calls. The new fields sum to the old number
+exactly, so this is a re-attribution of the same silence.
+
+**Not covered:** matching is positional, not semantic — a dropped transcript shifts text onto a
+neighbouring turn (pinned by `test_dropped_transcript_shifts_text_onto_the_next_turn`, reasoning
+in D2). Every number here still carries the ~1 s/turn VAD bias that Task D will change. Nothing
+is live-verified — these are replays of captured logs. Full list in the evidence artefact.
