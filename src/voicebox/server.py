@@ -185,8 +185,12 @@ async def listen(timeout: float = 30.0, cursor: int = 0) -> dict:
         cursor: Event-log position from the previous call (0 = from start).
 
     Returns:
-        ``{"events": [...], "cursor": <next cursor>}`` — ``events`` is empty
-        if the timeout elapsed with nothing new.
+        ``{"events": [...], "cursor": <next cursor>, "transcription_lag_secs"}``
+        — ``events`` is empty if the timeout elapsed with nothing new.
+        ``transcription_lag_secs`` is how long the oldest un-transcribed
+        utterance has been waiting on Whisper: non-zero with no events means a
+        transcript is still coming, so call again rather than concluding the
+        app bot said nothing.
 
     """
     # Parent-side deadline: the child enforces `timeout` on the event wait,
@@ -233,13 +237,23 @@ async def speak(
 
     Returns:
         ``{"armed": True}`` when ``when`` is set; otherwise ``{"queued": True}``,
-        plus the playout timing fields when ``wait_for_playout`` is true.
+        plus, when ``wait_for_playout`` is true, ``played`` and either the
+        timing fields (``started_at`` / ``finished_at`` / ``interrupted``) or a
+        ``reason`` explaining why the playout was never observed. A
+        ``played: false`` result is a diagnosis, not an error: the speech was
+        queued and may still be playing.
 
     """
     if when is not None:
         deadline = 60.0  # armed, returns immediately
-    elif wait_for_playout or wait_for_turn:
+    elif wait_for_turn:
+        # Unbounded on the agent side — it waits for the app bot to fall
+        # silent, and the app bot decides when that is.
         deadline = 150.0
+    elif wait_for_playout:
+        # Must outlive the agent's own PLAYOUT_TIMEOUT_SECS (30 s), so the
+        # caller gets the agent's diagnosis rather than an IPC timeout.
+        deadline = 60.0
     else:
         deadline = 60.0
     return await send_command(

@@ -78,6 +78,7 @@ from voicebox.events import (
 )
 from voicebox.metrics import compute_metrics
 from voicebox.processors.kokoro_tts import KokoroTTSService
+from voicebox.processors.nonblocking_whisper_stt import NonBlockingSegmentedSTT
 from voicebox.raw_pcm_serializer import RawPCMSerializer
 from voicebox.runner_args import BrowserShimRunnerArguments
 from voicebox.timing import TimedSTTMixin, TimedTurnAnalyzerMixin, log_duration
@@ -90,8 +91,11 @@ load_dotenv(override=True)
 # consumers can subtract it.
 VAD_STOP_SECS = 1.0
 
-# Max seconds speak(wait_for_playout=True) waits for our audio to finish playing out.
-PLAYOUT_TIMEOUT_SECS = 120.0
+# Max seconds speak(wait_for_playout=True) waits for our audio to finish playing
+# out. Short on purpose: expiry is now a diagnosis handed back to the caller
+# (played=False plus a reason), not an exception, so waiting minutes to raise
+# something uninformative buys nothing.
+PLAYOUT_TIMEOUT_SECS = 30.0
 
 # Kokoro's playout reaches the transport in segments separated by sub-second
 # gaps, so pipecat emits a BotStarted/StoppedSpeakingFrame PAIR per segment.
@@ -101,16 +105,30 @@ PLAYOUT_TIMEOUT_SECS = 120.0
 PLAYOUT_SETTLE_SECS = 1.0
 
 
-# Phase 0 instrumentation: the pipeline is built from timed variants of the STT
-# services and the turn analyzer so a DEBUG session log attributes per-turn lag
-# to a named call. The mixins only bracket the wrapped call with a clock read —
-# see timing.py.
-class _TimedWhisperSTTService(TimedSTTMixin, WhisperSTTService):
-    """faster-whisper STT with ``run_stt`` timed at DEBUG."""
+# The STT services are composed from two mixins, in this order:
+#   NonBlockingSegmentedSTT — transcribes on a worker, off the frame task.
+#   TimedSTTMixin           — Phase 0 instrumentation: brackets the wrapped
+#                             call with a clock read so a DEBUG session log
+#                             attributes per-turn lag to a named call.
+# Timing therefore measures the real transcription where it now runs, inside
+# the worker. Neither mixin vendors pipecat code; see timing.py and
+# processors/nonblocking_whisper_stt.py.
+#
+# Both classes carry `# type: ignore[misc]`: each Whisper service re-declares
+# `_settings` with its own nested Settings type, which pyright reads as
+# conflicting with the STTService declaration that reaches the class through
+# NonBlockingSegmentedSTT. The MRO resolves it to the concrete service's at
+# runtime; nothing here changes that.
+class _NonBlockingWhisperSTTService(  # type: ignore[misc]
+    NonBlockingSegmentedSTT, TimedSTTMixin, WhisperSTTService
+):
+    """faster-whisper STT, transcribing off the frame task, timed at DEBUG."""
 
 
-class _TimedWhisperSTTServiceMLX(TimedSTTMixin, WhisperSTTServiceMLX):
-    """MLX Whisper STT with ``run_stt`` timed at DEBUG."""
+class _NonBlockingWhisperSTTServiceMLX(  # type: ignore[misc]
+    NonBlockingSegmentedSTT, TimedSTTMixin, WhisperSTTServiceMLX
+):
+    """MLX Whisper STT, transcribing off the frame task, timed at DEBUG."""
 
 
 class _TimedSmartTurnAnalyzer(TimedTurnAnalyzerMixin, LocalSmartTurnAnalyzerV3):
@@ -225,6 +243,8 @@ class PipecatMCPAgent:
         self._transport = transport
         self._record_dir = record_dir
         self._audio_buffer = None  # type: ignore[assignment]
+        # Set in start(); listen_events()/speak() start the agent before reading it.
+        self._stt: NonBlockingSegmentedSTT = None  # type: ignore[assignment]
 
         self._task: Optional[asyncio.Task] = None
         self._pipeline_task: Optional[PipelineWorker] = None
@@ -296,7 +316,7 @@ class PipecatMCPAgent:
 
         logger.info("Starting Pipecat MCP Agent pipeline...")
 
-        stt = self._create_stt_service()
+        stt = self._stt = self._create_stt_service()
         tts = self._create_tts_service()
         vad = self._create_vad_processor()
 
@@ -503,7 +523,10 @@ class PipecatMCPAgent:
                 or re-reading events. ``0`` replays the whole session.
 
         Returns:
-            ``{"events": [...], "cursor": <next cursor>}``.
+            ``{"events": [...], "cursor": <next cursor>, "transcription_lag_secs": <float>}``.
+            The lag is the age of the oldest segment still waiting on Whisper —
+            non-zero means "a transcript is coming", which is what tells an
+            empty ``events`` list apart from silence.
 
         """
         if not self._started:
@@ -520,7 +543,11 @@ class PipecatMCPAgent:
                 except asyncio.TimeoutError:
                     pass
             events = self._events[cursor:]
-        return {"events": [e.model_dump() for e in events], "cursor": cursor + len(events)}
+        return {
+            "events": [e.model_dump() for e in events],
+            "cursor": cursor + len(events),
+            "transcription_lag_secs": round(self._stt.transcription_lag_secs, 3),
+        }
 
     async def speak(
         self,
@@ -616,9 +643,24 @@ class PipecatMCPAgent:
             try:
                 await self._queue_speak_frames(text)
                 result = await asyncio.wait_for(self._playout.future, timeout=PLAYOUT_TIMEOUT_SECS)
+            except asyncio.TimeoutError:
+                # The audio was queued; what failed is the evidence that it
+                # played. Raising here told the caller nothing about which half
+                # broke — TTS, transport, or the page's audio graph — so report
+                # it instead and let them read listen() to find out.
+                logger.warning(f"playout not observed within {PLAYOUT_TIMEOUT_SECS}s")
+                return {
+                    "queued": True,
+                    "played": False,
+                    "reason": (
+                        f"no tester_speech_stopped observed within {PLAYOUT_TIMEOUT_SECS}s of "
+                        "queueing; the speech may still play. Check listen() for "
+                        "tester_speech_started and client_connected."
+                    ),
+                }
             finally:
                 self._playout = None
-        return {"queued": True, **result}
+        return {"queued": True, "played": True, **result}
 
     async def _wait_for_app_bot_silent(self):
         """Block until the app bot is not currently speaking."""
@@ -659,16 +701,20 @@ class PipecatMCPAgent:
             ]
         )
 
-    def _create_stt_service(self) -> STTService:
+    def _create_stt_service(self) -> NonBlockingSegmentedSTT:
+        # Both platforms get the non-blocking worker: the inline await is in
+        # SegmentedSTTService, which both Whisper services inherit, so fixing
+        # one platform would leave the other with the bug and no test able to
+        # see it.
         if sys.platform == "darwin":
-            return _TimedWhisperSTTServiceMLX(
+            return _NonBlockingWhisperSTTServiceMLX(
                 settings=WhisperSTTServiceMLX.Settings(model="mlx-community/whisper-large-v3-turbo")
             )
         # device="cpu" is pinned, not left at pipecat's "auto": auto-detect picks CUDA
         # whenever a GPU is visible, and then faster-whisper needs libcublas/libcudnn,
         # which we deliberately don't depend on. CPU keeps the install API-key- and
         # CUDA-free at the cost of slower transcription.
-        return _TimedWhisperSTTService(
+        return _NonBlockingWhisperSTTService(
             settings=WhisperSTTService.Settings(model="Systran/faster-distil-whisper-large-v3"),
             device="cpu",
             compute_type="int8",
