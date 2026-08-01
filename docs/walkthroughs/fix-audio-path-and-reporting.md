@@ -17,7 +17,7 @@ Task breakdown and success criteria:
 | **B** | `metrics.json` reconciles with itself (turns from intervals, split gap attribution) | `df7f353` | [t-b-metrics-reconcile.md](../artefacts/fix-audio-path-and-reporting/t-b-metrics-reconcile.md) | ✅ |
 | **C** | Phase-0 timing instrumentation; attributes the unexplained ~24 s per-turn lag | `11090da` | [t-c-timing-instrumentation.md](../artefacts/fix-audio-path-and-reporting/t-c-timing-instrumentation.md) | ✅ |
 | **D** | VAD moves upstream of the STT (90 % of speech was trimmed before Whisper) | `ad93dd4` | [t-d-vad-upstream.md](../artefacts/fix-audio-path-and-reporting/t-d-vad-upstream.md) | ✅ |
-| **E** | Transcription leaves the frame path (non-blocking Whisper worker) | — | — | ⬜ |
+| **E** | Transcription leaves the frame path (non-blocking Whisper worker) | `32b1d6c` | [t-e-nonblocking-stt.md](../artefacts/fix-audio-path-and-reporting/t-e-nonblocking-stt.md) | ✅ |
 | **F** | Transcript-loss holes closed (drain STT before writing artefacts) | — | — | ⬜ |
 | **G** | Kokoro plays one utterance as one turn (no mid-utterance silence) | — | — | ⬜ |
 | **H** | `listen()` batches time-ordered; docstrings state what timestamps mean | — | — | ⬜ |
@@ -148,3 +148,33 @@ before `ad93dd4` are not comparable with reports after it.
 **Not covered:** D3 🔴 — that reported speech duration matches the app's own logs to within
 `vad_stop_secs` — needs a live app. Silero itself is not exercised by the placement tests; they
 use a deterministic stub analyzer. Full list in the evidence artefact.
+
+---
+
+## Task E — transcription leaves the frame path
+
+*Commit `32b1d6c`. Criteria: execution spec § "Task E". Criterion 1 adapted — see BUILDLOG D5.*
+
+- `SegmentedSTTService` awaited transcription inline, from the same task that carries system
+  frames, so **nothing got past the STT while Whisper ran**. With a 4 s transcription in
+  flight, a queued `speak()` reached the transport in **3503 ms** before this commit and
+  **97 ms** after. Live, that was a `speak()` playing 51 s late and a caller who thought
+  voicebox had deadlocked.
+- `NonBlockingSegmentedSTT` intercepts `run_stt`: the frame task queues the segment and yields
+  nothing; one worker calls the wrapped service's real `run_stt` and pushes from there. One
+  worker, never a pool — segments must come back in the order they were spoken, and two Whisper
+  runs would only fight over the same CPU.
+- **Why not the override the spec named:** `_handle_user_stopped_speaking` also frames the WAV
+  segment, so overriding it means copying that framing here — and pipecat 1.6.0 has already
+  changed those exact lines (`wants_wav_segments`). The copy would rot silently.
+- Both platforms are wired, not just the non-Darwin path: the inline await is in the shared base
+  class, and fixing one path would leave the other broken with no test able to see it
+  (BUILDLOG D6).
+- `speak(wait_for_playout=True)` no longer raises on timeout. It returns
+  `{queued: true, played: false, reason: ...}` after 30 s (was 120 s), because an exception said
+  nothing about *which* half failed. `listen()` gained `transcription_lag_secs`, so an empty
+  `events` list can be told apart from a transcript still in the oven.
+
+**Not covered:** E5 🔴 needs a live app. The MLX path is wired but unexercised on Linux. Nothing
+drains the queue at teardown yet — a transcription in flight when `stop()` runs is still lost;
+that is Task F, next. Full list in the evidence artefact.

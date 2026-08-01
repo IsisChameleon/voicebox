@@ -124,3 +124,50 @@ and voicebox has never been run against 1.6.0 — establishing that is a task, n
 **Consequence:** the upgrade branch must look at `wants_wav_segments`, new in 1.6.0's
 `SegmentedSTTService`: it decides whether `run_stt` receives a WAV container or raw PCM, and
 both our STT wrapper and Task E's queueing override assume the WAV framing 1.3.0 always used.
+
+---
+
+## D5 — Task E intercepts `run_stt` instead of overriding `_handle_user_stopped_speaking`
+
+*2026-08-01. Task E, branch `fix/audio-path-and-reporting`.*
+
+**Context:** the execution spec's criterion 1 says the new processor "overrides
+`_handle_user_stopped_speaking` to enqueue the segment and return immediately". That method does
+two things: it frames the buffered audio into a WAV container, and it awaits transcription.
+Overriding it means copying the framing.
+
+**Decided:** override `run_stt` instead. On the frame task it queues the segment and yields
+nothing; the worker calls `super().run_stt` for the real transcription. `_handle_user_stopped_speaking`
+is left untouched and still does the framing.
+
+**Why:** the copied framing would be a silent time bomb. pipecat 1.6.0 has *already* changed
+exactly those lines — `wants_wav_segments` now decides whether `run_stt` receives a WAV
+container or raw PCM (D4) — so a copy made today would keep building WAVs for a local model
+that, on upgrade, expects PCM, and the failure would look like bad transcription rather than
+like a merge problem. Intercepting `run_stt` leaves the framing in pipecat where it belongs;
+the upgrade branch has one less landmine.
+
+**Rejected:** copying the ~12 lines with a "mirrors stt_service.py:765-780" comment. Comments
+do not fail a test run.
+
+**Consequence:** `run_stt` now means two things in this class hierarchy — "hand off" at the
+front of the MRO, "transcribe" further along. The composition order is load-bearing
+(`NonBlockingSegmentedSTT, TimedSTTMixin, WhisperSTTService`) and is asserted in the artefact
+rather than left to a reader's MRO arithmetic.
+
+---
+
+## D6 — The non-blocking STT applies to both platforms, not just the non-Darwin path
+
+*2026-08-01. Task E, branch `fix/audio-path-and-reporting`.*
+
+**Decided:** wire `NonBlockingSegmentedSTT` into the MLX (Darwin) service as well as
+faster-whisper, which the spec left to the implementer's judgement.
+
+**Why:** the inline await is in `SegmentedSTTService`, which both Whisper services inherit. The
+bug is identical on both. Fixing one would create exactly the parallel-flow split that hides
+defects: each path stays internally consistent, per-path tests pass, and the Mac path keeps a
+51-second `speak()` delay that nothing on CI can see.
+
+**Consequence:** the MLX path is wired but unexercised — this machine is Linux, and no test in
+the suite constructs the MLX service. Stated here so it is not mistaken for verified.
