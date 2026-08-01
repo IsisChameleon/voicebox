@@ -16,7 +16,7 @@ Task breakdown and success criteria:
 | **A** | Session startup fails loudly; `attach_hint` stops destroying the shim tab | `1df7e51` | [t-a-startup-fails-loudly.md](../artefacts/fix-audio-path-and-reporting/t-a-startup-fails-loudly.md) | ✅ |
 | **B** | `metrics.json` reconciles with itself (turns from intervals, split gap attribution) | `df7f353` | [t-b-metrics-reconcile.md](../artefacts/fix-audio-path-and-reporting/t-b-metrics-reconcile.md) | ✅ |
 | **C** | Phase-0 timing instrumentation; attributes the unexplained ~24 s per-turn lag | `11090da` | [t-c-timing-instrumentation.md](../artefacts/fix-audio-path-and-reporting/t-c-timing-instrumentation.md) | ✅ |
-| **D** | VAD moves upstream of the STT (90 % of speech was trimmed before Whisper) | — | — | ⬜ |
+| **D** | VAD moves upstream of the STT (90 % of speech was trimmed before Whisper) | `ad93dd4` | [t-d-vad-upstream.md](../artefacts/fix-audio-path-and-reporting/t-d-vad-upstream.md) | ✅ |
 | **E** | Transcription leaves the frame path (non-blocking Whisper worker) | — | — | ⬜ |
 | **F** | Transcript-loss holes closed (drain STT before writing artefacts) | — | — | ⬜ |
 | **G** | Kokoro plays one utterance as one turn (no mid-utterance silence) | — | — | ⬜ |
@@ -115,3 +115,36 @@ by name instead of guessing.
 **Not covered:** C3 🔴, the live session that actually attributes the 24 s, has not run. Until it
 does, the Task D follow-up (dropping `TurnAnalyzerUserTurnStopStrategy`) stays unjustified.
 `on_user_turn_stopped` is instrumented but untested. Full list in the evidence artefact.
+
+---
+
+## Task D — the VAD moves upstream of the STT
+
+*Commit `ad93dd4`. Criteria: execution spec § "Task D". Criterion 1 adapted — see BUILDLOG D3.*
+
+- A `VADProcessor` stage now sits between `transport.input()` and the STT
+  (`agent.py:_build_stages`); the aggregator no longer carries a `vad_analyzer`. The spec asked
+  for the analyzer on `WebsocketServerParams`, but pipecat 1.3.0 has no such field — the VAD is
+  a pipeline processor in this version. Same intent, only place it can live.
+- **Why it matters:** `SegmentedSTTService` trims its buffer to the last second on every audio
+  frame that arrives while it believes the user is silent
+  (`pipecat/services/stt_service.py:805-807`), and `_user_speaking` flips only when the STT
+  *receives* a `VADUserStartedSpeakingFrame`. With the VAD downstream that frame could not
+  arrive until the audio it describes had already been trimmed away.
+- Measured on the same 10 s flood through both topologies: **10.20 s reaches `run_stt` with the
+  VAD upstream, 1.50 s with it downstream** — 85 % of the app bot's speech was being thrown away
+  before Whisper ever saw it. This is why transcripts started mid-sentence, why a 21 s utterance
+  measured 5.1 s, and why Whisper hallucinated "Thank you." from a one-second stub.
+- `tests/test_vad_placement.py` keeps a positive test and a **negative control**, so moving the
+  stage back fails the suite rather than silently regressing.
+- Stage assembly and two config factories moved out of `start()` into `_build_stages`,
+  `_create_vad_processor` and `_create_context_aggregators` — the ordering and the 1.0 s
+  `stop_secs` are now assertable without booting a pipeline.
+
+**Watch out:** VAD timestamps are now acoustically true rather than post-STT, so every
+`app_bot_speech_*` value shifts earlier and every number in `metrics.json` moves. Reports from
+before `ad93dd4` are not comparable with reports after it.
+
+**Not covered:** D3 🔴 — that reported speech duration matches the app's own logs to within
+`vad_stop_secs` — needs a live app. Silero itself is not exercised by the placement tests; they
+use a deterministic stub analyzer. Full list in the evidence artefact.

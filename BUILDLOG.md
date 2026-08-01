@@ -60,3 +60,35 @@ neighbouring turn. It is documented in `metrics._BIAS_NOTES` and now *pinned by 
 (`test_dropped_transcript_shifts_text_onto_the_next_turn`) so it cannot change silently. Turn
 *counts* still reconcile, which is what Task B's criteria actually require: the shift moves text
 between turns, it never loses one.
+
+---
+
+## D3 — The VAD moves upstream as a pipeline stage, not as a transport parameter
+
+*2026-08-01. Task D, branch `fix/audio-path-and-reporting`.*
+
+**Context:** the execution spec's criterion 1 says `WebsocketServerParams` must carry
+`vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=VAD_STOP_SECS))`. It does not: in
+pipecat 1.3.0 `WebsocketServerParams.model_fields` has no `vad_analyzer` at all (checked, not
+assumed — the check is in the Task D artefact). The VAD became a pipeline processor,
+`pipecat.processors.audio.vad_processor.VADProcessor`.
+
+**Decided:** implement the task's *intent* — put a `VADProcessor` stage between
+`transport.input()` and the STT — rather than stop and ask. Recorded here and surfaced in the
+commit message and the task report instead.
+
+**Why:** the spec's title is "Move the VAD upstream of the STT" and its whole rationale is
+about frame ordering, not about which object owns the analyzer. In this pipecat version there
+is exactly one way to place a VAD upstream of a processor, so there was no judgement call to
+delegate. `VADProcessor` broadcasts the same VAD frames both directions that the aggregator
+did, so nothing downstream changes shape.
+
+**Rejected:** pinning an older pipecat that still had the transport parameter. The parameter
+was a convenience wrapper over the same `VADController`; downgrading to satisfy the letter of a
+spec is not a fix.
+
+**Consequence:** the spec's criterion 1 can never be satisfied as written; the artefact records
+it as *adapted* with the API check attached, rather than as met. Three factories were extracted
+from `start()` (`_create_vad_processor`, `_create_context_aggregators`, `_build_stages`) so the
+stage order and the 1.0 s `stop_secs` are assertable without booting a pipeline — Tasks E–G all
+touch `start()` and now touch a shorter one.
