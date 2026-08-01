@@ -50,7 +50,8 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregatorParams,
     UserTurnStoppedMessage,
 )
-from pipecat.processors.frame_processor import FrameDirection
+from pipecat.processors.audio.vad_processor import VADProcessor
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.services.stt_service import STTService
 from pipecat.services.tts_service import TTSService
@@ -297,31 +298,10 @@ class PipecatMCPAgent:
 
         stt = self._create_stt_service()
         tts = self._create_tts_service()
+        vad = self._create_vad_processor()
 
         context = LLMContext()
-        user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
-            context,
-            user_params=LLMUserAggregatorParams(
-                user_turn_strategies=UserTurnStrategies(
-                    # The "user" of this pipeline is the REMOTE BOT (its audio
-                    # is our input). The default start strategies ship with
-                    # enable_interruptions=True, which cancels our in-flight
-                    # Kokoro TTS the moment the bot makes a sound — a synthetic
-                    # human must be able to keep talking (and talk over the bot).
-                    start=[
-                        VADUserTurnStartStrategy(enable_interruptions=False),
-                        TranscriptionUserTurnStartStrategy(enable_interruptions=False),
-                    ],
-                    stop=[
-                        TurnAnalyzerUserTurnStopStrategy(turn_analyzer=_TimedSmartTurnAnalyzer())
-                    ],
-                ),
-                # 1.0s captures complete utterances over WebRTC with natural
-                # pauses; 0.2s (pipecat's default for clean TTS sources) chops
-                # remote speech mid-sentence and produces single-word transcripts.
-                vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=VAD_STOP_SECS)),
-            ),
-        )
+        user_aggregator, assistant_aggregator = self._create_context_aggregators(context)
 
         if self._record_dir:
             from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
@@ -332,21 +312,9 @@ class PipecatMCPAgent:
                 buffer_size=0,  # accumulate everything
             )
 
-        stages = [
-            self._transport.input(),
-            stt,
-            user_aggregator,
-            tts,
-            assistant_aggregator,
-            self._transport.output(),
-        ]
-        # AudioBufferProcessor at the END catches both InputAudioRawFrame
-        # (from transport.input downstream) and OutputAudioRawFrame (TTS →
-        # transport.output) as they continue past the output — neither is
-        # destructively consumed by transport.output.
-        if self._audio_buffer:
-            stages.append(self._audio_buffer)
-        pipeline = Pipeline(stages)
+        pipeline = Pipeline(
+            self._build_stages(vad, stt, user_aggregator, tts, assistant_aggregator)
+        )
 
         # enable_rtvi=False: we are a headless synthetic user, not an RTVI
         # client. Conversation events reach Claude via listen_events()'s
@@ -708,6 +676,80 @@ class PipecatMCPAgent:
 
     def _create_tts_service(self) -> TTSService:
         return KokoroTTSService(voice_id="af_heart")
+
+    def _create_vad_processor(self) -> VADProcessor:
+        """Build the VAD stage that fronts the STT.
+
+        1.0s captures complete utterances over WebRTC with natural pauses;
+        0.2s (pipecat's default for clean TTS sources) chops remote speech
+        mid-sentence and produces single-word transcripts.
+        """
+        return VADProcessor(
+            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=VAD_STOP_SECS))
+        )
+
+    def _create_context_aggregators(self, context: LLMContext) -> LLMContextAggregatorPair:
+        """Build the user/assistant aggregator pair.
+
+        The pair carries no ``vad_analyzer``: the VAD is a pipeline stage
+        upstream of the STT (see ``_build_stages``), not a parameter of a
+        processor that sits downstream of it.
+        """
+        return LLMContextAggregatorPair(
+            context,
+            user_params=LLMUserAggregatorParams(
+                user_turn_strategies=UserTurnStrategies(
+                    # The "user" of this pipeline is the REMOTE BOT (its audio
+                    # is our input). The default start strategies ship with
+                    # enable_interruptions=True, which cancels our in-flight
+                    # Kokoro TTS the moment the bot makes a sound — a synthetic
+                    # human must be able to keep talking (and talk over the bot).
+                    start=[
+                        VADUserTurnStartStrategy(enable_interruptions=False),
+                        TranscriptionUserTurnStartStrategy(enable_interruptions=False),
+                    ],
+                    stop=[
+                        TurnAnalyzerUserTurnStopStrategy(turn_analyzer=_TimedSmartTurnAnalyzer())
+                    ],
+                ),
+            ),
+        )
+
+    def _build_stages(
+        self,
+        vad: FrameProcessor,
+        stt: STTService,
+        user_aggregator: FrameProcessor,
+        tts: TTSService,
+        assistant_aggregator: FrameProcessor,
+    ) -> list[FrameProcessor]:
+        """Order the pipeline stages.
+
+        The VAD sits BETWEEN the transport input and the STT, and that order is
+        the whole point: ``SegmentedSTTService`` trims its buffer to the last
+        second on every audio frame that arrives while it believes the user is
+        silent (``pipecat/services/stt_service.py:805-807``). With the VAD
+        downstream, ``VADUserStartedSpeakingFrame`` cannot reach the STT until
+        the audio it describes has already passed through it, so audio that
+        queues during a slow ``run_stt`` is discarded — 85-90 % of it, measured
+        in ``tests/test_vad_placement.py`` and in the triage probes.
+        """
+        stages = [
+            self._transport.input(),
+            vad,
+            stt,
+            user_aggregator,
+            tts,
+            assistant_aggregator,
+            self._transport.output(),
+        ]
+        # AudioBufferProcessor at the END catches both InputAudioRawFrame
+        # (from transport.input downstream) and OutputAudioRawFrame (TTS →
+        # transport.output) as they continue past the output — neither is
+        # destructively consumed by transport.output.
+        if self._audio_buffer:
+            stages.append(self._audio_buffer)
+        return stages
 
 
 async def create_agent(runner_args: RunnerArguments) -> PipecatMCPAgent:
