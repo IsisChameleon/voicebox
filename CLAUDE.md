@@ -160,6 +160,10 @@ Established 2026-08-01; the repo predates it, so older branches have none of thi
   Opens by naming the success criteria it evidences (with the spec's path), and closes with a
   "not covered" section — untested paths, 🔴 live-only stories, scope cuts.
 
+Cite a task's commit in the walkthrough **after** the commit exists — `git commit --amend` to
+insert the sha changes that sha, leaving a dead reference. Land the code, read the sha, then
+commit the doc update.
+
 ## Conventions
 
 - Python ≥ 3.11, `uv` for everything. Google-style docstrings (ruff `D` enforced).
