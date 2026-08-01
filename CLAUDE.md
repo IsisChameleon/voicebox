@@ -81,6 +81,10 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
 - **`record_dir` exists** (`runner_args.py`, `agent.py:105-128,194-231`): set it and `stop()` writes
   user/bot/merged WAVs via `AudioBufferProcessor`. Snapshot buffers BEFORE `stop_recording()` — it
   resets them.
+- **Ending a `PipelineWorker` means `stop_when_done()`, not `stop()`.** `BaseWorker.stop()` cancels
+  job groups and sets the finished event but never ends the pipeline run, so `WorkerRunner.run()`
+  never returns — a test that awaits it hangs forever. `stop_when_done()` queues the `EndFrame`,
+  which is what `agent.py:449` does in production.
 - **`spawn`, not fork** (`agent_ipc.py:24`) — forking from the async MCP context copies the event
   loop / fds / locks and breaks.
 - **Shim is defensive**: every hook is gated on the API existing; on insecure origins (non-localhost

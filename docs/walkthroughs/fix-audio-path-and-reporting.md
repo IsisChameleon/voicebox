@@ -15,7 +15,7 @@ Task breakdown and success criteria:
 |---|---|---|---|---|
 | **A** | Session startup fails loudly; `attach_hint` stops destroying the shim tab | `1df7e51` | [t-a-startup-fails-loudly.md](../artefacts/fix-audio-path-and-reporting/t-a-startup-fails-loudly.md) | ✅ |
 | **B** | `metrics.json` reconciles with itself (turns from intervals, split gap attribution) | — | — | ⬜ |
-| **C** | Phase-0 timing instrumentation; attributes the unexplained ~24 s per-turn lag | — | — | ⬜ |
+| **C** | Phase-0 timing instrumentation; attributes the unexplained ~24 s per-turn lag | `d1ec4e9` | [t-c-timing-instrumentation.md](../artefacts/fix-audio-path-and-reporting/t-c-timing-instrumentation.md) | ✅ |
 | **D** | VAD moves upstream of the STT (90 % of speech was trimmed before Whisper) | — | — | ⬜ |
 | **E** | Transcription leaves the frame path (non-blocking Whisper worker) | — | — | ⬜ |
 | **F** | Transcript-loss holes closed (drain STT before writing artefacts) | — | — | ⬜ |
@@ -58,6 +58,27 @@ Both are asserted by construction (the poll, the hint text) but unproven against
 
 ---
 
-## Task B — *(in flight, not committed)*
+## Task C — Phase 0 timing instrumentation
 
-## Task C — *(in flight, not committed)*
+*Commit `d1ec4e9`. Criteria: execution spec § "Task C". No behaviour change by design.*
+
+- `src/voicebox/timing.py` adds `log_duration()` plus two mixins — `TimedSTTMixin` (times
+  `run_stt`) and `TimedTurnAnalyzerMixin` (times `analyze_end_of_turn`). They list **first** in the
+  bases so they precede the concrete service in the MRO, and delegate via `super()`, so the same
+  mixin composes with a subclass of a concrete service without changing.
+- `agent.py` builds the pipeline from `_TimedWhisperSTTService`, `_TimedWhisperSTTServiceMLX` and
+  `_TimedSmartTurnAnalyzer` (`agent.py:103-116`), and wraps `on_user_turn_stopped` in
+  `log_duration` (`agent.py:376`). Nothing is vendored from pipecat.
+- Every line is `voicebox.timing name=<call> secs=<float>` at DEBUG — one grep splits a session
+  log by call.
+
+**Why it exists:** a dogfood session showed a steady ~24 s per-turn transcript lag, larger than
+warm Whisper throughput (0.40× realtime) accounts for. `LocalSmartTurnAnalyzerV3` is the suspect,
+but that is a hypothesis — this task lands the measurement so the next live session attributes it
+by name instead of guessing.
+
+**Not covered:** C3 🔴, the live session that actually attributes the 24 s, has not run. Until it
+does, the Task D follow-up (dropping `TurnAnalyzerUserTurnStopStrategy`) stays unjustified.
+`on_user_turn_stopped` is instrumented but untested. Full list in the evidence artefact.
+
+## Task B — *(in flight, not committed)*

@@ -79,6 +79,7 @@ from voicebox.metrics import compute_metrics
 from voicebox.processors.kokoro_tts import KokoroTTSService
 from voicebox.raw_pcm_serializer import RawPCMSerializer
 from voicebox.runner_args import BrowserShimRunnerArguments
+from voicebox.timing import TimedSTTMixin, TimedTurnAnalyzerMixin, log_duration
 
 load_dotenv(override=True)
 
@@ -97,6 +98,22 @@ PLAYOUT_TIMEOUT_SECS = 120.0
 # silent this long, so the reported span covers the whole utterance instead of
 # clipping at the first segment.
 PLAYOUT_SETTLE_SECS = 1.0
+
+
+# Phase 0 instrumentation: the pipeline is built from timed variants of the STT
+# services and the turn analyzer so a DEBUG session log attributes per-turn lag
+# to a named call. The mixins only bracket the wrapped call with a clock read —
+# see timing.py.
+class _TimedWhisperSTTService(TimedSTTMixin, WhisperSTTService):
+    """faster-whisper STT with ``run_stt`` timed at DEBUG."""
+
+
+class _TimedWhisperSTTServiceMLX(TimedSTTMixin, WhisperSTTServiceMLX):
+    """MLX Whisper STT with ``run_stt`` timed at DEBUG."""
+
+
+class _TimedSmartTurnAnalyzer(TimedTurnAnalyzerMixin, LocalSmartTurnAnalyzerV3):
+    """Smart-turn v3 analyzer with ``analyze_end_of_turn`` timed at DEBUG."""
 
 
 class _PipelineEventObserver(BaseObserver):
@@ -296,7 +313,7 @@ class PipecatMCPAgent:
                         TranscriptionUserTurnStartStrategy(enable_interruptions=False),
                     ],
                     stop=[
-                        TurnAnalyzerUserTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3())
+                        TurnAnalyzerUserTurnStopStrategy(turn_analyzer=_TimedSmartTurnAnalyzer())
                     ],
                 ),
                 # 1.0s captures complete utterances over WebRTC with natural
@@ -356,13 +373,14 @@ class PipecatMCPAgent:
 
         @user_aggregator.event_handler("on_user_turn_stopped")
         async def on_user_turn_stopped(aggregator, strategy, message: UserTurnStoppedMessage):
-            if message.content:
-                # message.timestamp is the ISO wall-clock at which the app
-                # bot's turn STARTED; the event's t is when the batch
-                # transcript became ready.
-                await self._emit(
-                    TranscriptEvent(text=message.content, turn_started_at=message.timestamp)
-                )
+            with log_duration("on_user_turn_stopped"):
+                if message.content:
+                    # message.timestamp is the ISO wall-clock at which the app
+                    # bot's turn STARTED; the event's t is when the batch
+                    # transcript became ready.
+                    await self._emit(
+                        TranscriptEvent(text=message.content, turn_started_at=message.timestamp)
+                    )
 
         # Log header: consumers of app_bot_speech_stopped timings need the
         # built-in VAD lag to subtract it.
@@ -675,14 +693,14 @@ class PipecatMCPAgent:
 
     def _create_stt_service(self) -> STTService:
         if sys.platform == "darwin":
-            return WhisperSTTServiceMLX(
+            return _TimedWhisperSTTServiceMLX(
                 settings=WhisperSTTServiceMLX.Settings(model="mlx-community/whisper-large-v3-turbo")
             )
         # device="cpu" is pinned, not left at pipecat's "auto": auto-detect picks CUDA
         # whenever a GPU is visible, and then faster-whisper needs libcublas/libcudnn,
         # which we deliberately don't depend on. CPU keeps the install API-key- and
         # CUDA-free at the cost of slower transcription.
-        return WhisperSTTService(
+        return _TimedWhisperSTTService(
             settings=WhisperSTTService.Settings(model="Systran/faster-distil-whisper-large-v3"),
             device="cpu",
             compute_type="int8",
