@@ -71,7 +71,10 @@ between turns, it never loses one.
 `vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=VAD_STOP_SECS))`. It does not: in
 pipecat 1.3.0 `WebsocketServerParams.model_fields` has no `vad_analyzer` at all (checked, not
 assumed — the check is in the Task D artefact). The VAD became a pipeline processor,
-`pipecat.processors.audio.vad_processor.VADProcessor`.
+`pipecat.processors.audio.vad_processor.VADProcessor`. Confirmed afterwards against the latest
+release too (1.6.0, see D4): transports still carry no VAD, and `vad_processor.py` is
+byte-identical to 1.3.0's. The spec was written against the pre-1.0 `TransportParams` API, not
+against a version we could upgrade to.
 
 **Decided:** implement the task's *intent* — put a `VADProcessor` stage between
 `transport.input()` and the STT — rather than stop and ask. Recorded here and surfaced in the
@@ -92,3 +95,32 @@ it as *adapted* with the API check attached, rather than as met. Three factories
 from `start()` (`_create_vad_processor`, `_create_context_aggregators`, `_build_stages`) so the
 stage order and the 1.0 s `stop_secs` are assertable without booting a pipeline — Tasks E–G all
 touch `start()` and now touch a shorter one.
+
+---
+
+## D4 — Stay on pipecat 1.3.0 until Task H lands; upgrade to 1.6.0 on its own branch
+
+*2026-08-01. Branch: `fix/audio-path-and-reporting`.*
+
+**Context:** we are on 1.3.0 (released 2026-05-29); 1.6.0 is out (2026-07-21). `pyproject.toml`
+asks for `>=1.3.0` and `uv.lock` pinned the floor. Noticed while verifying D3.
+
+**Decided:** finish Tasks E–H on 1.3.0. Upgrade afterwards, as a branch whose diff is the
+upgrade and nothing else.
+
+**Why:** Tasks E, F and G all *override methods inside* pipecat classes, and those are exactly
+the files that churned — `services/stt_service.py` 150 changed lines, `services/tts_service.py`
+247, `processors/aggregators/llm_response_universal.py` 598. Writing overrides against a
+version we are about to replace means writing them twice; upgrading mid-chain would invalidate
+the evidence artefacts for tasks already landed. Checked before deciding that the upgrade is
+not a *substitute* for the remaining work: in 1.6.0 `SegmentedSTTService._handle_user_stopped_speaking`
+still awaits `process_generator(self.run_stt(audio))` inline (Task E's bug is unfixed upstream),
+the 1 s buffer trim is still at `stt_service.py:842-843`, and `BOT_VAD_STOP_SECS = 0.35` is
+still at `base_output.py:55` (Task G).
+
+**Rejected:** upgrading now to "get it over with". Nothing in E–H depends on a 1.4–1.6 feature,
+and voicebox has never been run against 1.6.0 — establishing that is a task, not a side effect.
+
+**Consequence:** the upgrade branch must look at `wants_wav_segments`, new in 1.6.0's
+`SegmentedSTTService`: it decides whether `run_stt` receives a WAV container or raw PCM, and
+both our STT wrapper and Task E's queueing override assume the WAV framing 1.3.0 always used.
