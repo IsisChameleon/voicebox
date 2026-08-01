@@ -130,13 +130,31 @@ uv run python scripts/e2e_readme_call.py      # full e2e against a localhost:300
 ## Quality checks (run before committing)
 
 ```bash
-uv run ruff check src/    # lint: docstring (D) + import (I) rules, line-length 100
-uv run ruff format src/   # format
-uv run pyright src/       # types
+uv run pytest -q                    # unit tests (pytest-asyncio, auto mode)
+uv run ruff check src/ tests/       # lint: docstring (D) + import (I) rules, line-length 100
+uv run ruff format src/ tests/      # format
+uv run pyright src/                 # types
 ```
 
-There is **no unit-test suite** — verification is via the two `scripts/` drivers, which need a
-real browser (and, for e2e, a running voice app on `localhost:3000`).
+The unit suite covers the pure/mockable parts (metrics, browser-session startup, timing
+instrumentation). The audio path itself is verified by the two `scripts/` drivers, which need a
+real browser (and, for e2e, a running voice app on `localhost:3000`) — anything marked 🔴 in a
+spec is live-only and cannot be proven by `pytest`.
+
+## Branch discipline (multi-task branches)
+
+Established 2026-08-01; the repo predates it, so older branches have none of this.
+
+- **`BUILDLOG.md`** at the repo root — append-only, numbered (`D1`, `D2`, …). One entry per
+  decision, written *when the decision is made*: what was decided, why, what was rejected.
+  Reversing a decision gets a new entry pointing back at the old one; entries are never rewritten.
+- **`docs/walkthroughs/<branch>.md`** — created at branch start with a task → commit → evidence
+  status table, updated as each task lands, marked complete before the review/PR pass. This is the
+  review surface: a reviewer should not have to re-derive the diff.
+- **`docs/artefacts/<branch>/t-<task>-<slug>.md`** — one per task, written when the task lands.
+  *Captured proof, not narrative*: real test output, greps, probe transcripts, pasted verbatim.
+  Opens by naming the success criteria it evidences (with the spec's path), and closes with a
+  "not covered" section — untested paths, 🔴 live-only stories, scope cuts.
 
 ## Conventions
 
