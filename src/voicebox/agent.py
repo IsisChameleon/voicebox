@@ -22,6 +22,8 @@ lives.
 
 import asyncio
 import sys
+from collections import deque
+from datetime import datetime, timezone
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -288,6 +290,12 @@ class PipecatMCPAgent:
         # Whether the app bot is currently speaking, toggled by the VAD frames.
         # Lets speak(wait_for_turn=True) block until the bot falls silent.
         self._app_bot_speaking: bool = False
+        # VAD start times of app-bot speech not yet claimed by a transcript.
+        # Transcripts arrive in segment order (single STT worker), so each one
+        # claims the earliest unclaimed start — same arrival-ordered rule as
+        # metrics._match_app_transcripts, same D2 bias (a segment Whisper
+        # returns nothing for shifts later claims by one interval).
+        self._unclaimed_bot_speech_starts: deque[float] = deque()
         # Background tasks armed by speak(when=...); cancelled on stop().
         self._armed_tasks: set[asyncio.Task] = set()
 
@@ -300,6 +308,32 @@ class PipecatMCPAgent:
             self._event_cond.notify_all()
         logger.debug(f"event: {event.type} @ {event.t:.3f}")
 
+    async def _emit_app_bot_transcript(self, text: str, aggregator_turn_started_at: str):
+        """Emit a transcript, stamping the turn start from our own VAD log.
+
+        The aggregator's ``UserTurnStoppedMessage.timestamp`` is only right
+        when the turn was VAD-started. Under batch STT a monologue's later
+        chunks VAD-start while the previous chunk's transcript is still in
+        Whisper, so their turns are (re)opened by the transcript's own arrival
+        and the aggregator stamps *arrival* time — observed live off by up to
+        103 s. Our observer logs every VAD start; the earliest unclaimed one
+        is this transcript's true turn start.
+
+        Args:
+            text: The transcribed utterance.
+            aggregator_turn_started_at: pipecat's ISO stamp, used only when no
+                unclaimed VAD start exists (should not happen in practice).
+
+        """
+        if self._unclaimed_bot_speech_starts:
+            started = self._unclaimed_bot_speech_starts.popleft()
+            turn_started_at = datetime.fromtimestamp(started, tz=timezone.utc).isoformat(
+                timespec="milliseconds"
+            )
+        else:
+            turn_started_at = aggregator_turn_started_at
+        await self._emit(TranscriptEvent(text=text, turn_started_at=turn_started_at))
+
     async def _on_pipeline_frame(self, frame: Frame):
         """Translate an observed pipeline frame into a log event.
 
@@ -310,6 +344,7 @@ class PipecatMCPAgent:
         """
         if isinstance(frame, VADUserStartedSpeakingFrame):
             self._app_bot_speaking = True
+            self._unclaimed_bot_speech_starts.append(frame.timestamp)
             await self._emit(
                 VoiceboxEvent(type=EventType.APP_BOT_SPEECH_STARTED, t=frame.timestamp)
             )
@@ -388,12 +423,7 @@ class PipecatMCPAgent:
         async def on_user_turn_stopped(aggregator, strategy, message: UserTurnStoppedMessage):
             with log_duration("on_user_turn_stopped"):
                 if message.content:
-                    # message.timestamp is the ISO wall-clock at which the app
-                    # bot's turn STARTED; the event's t is when the batch
-                    # transcript became ready.
-                    await self._emit(
-                        TranscriptEvent(text=message.content, turn_started_at=message.timestamp)
-                    )
+                    await self._emit_app_bot_transcript(message.content, message.timestamp)
 
         # Log header: consumers of app_bot_speech_stopped timings need the
         # built-in VAD lag to subtract it.
@@ -568,6 +598,12 @@ class PipecatMCPAgent:
                 except asyncio.TimeoutError:
                     pass
             events = self._events[cursor:]
+        if any(e.type == EventType.APP_BOT_SPEECH_STOPPED for e in events):
+            # The stop event that woke us precedes the STT queuing its segment
+            # by a few event-loop ticks. Sample the lag after they run, or a
+            # caller woken by speech end reads 0.0 at the exact moment a
+            # transcript is guaranteed to be pending.
+            await asyncio.sleep(0.05)
         return {
             "events": [e.model_dump() for e in events],
             "cursor": cursor + len(events),

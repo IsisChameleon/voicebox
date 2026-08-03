@@ -73,8 +73,9 @@ class SessionStartedEvent(VoiceboxEvent):
 class TranscriptEvent(VoiceboxEvent):
     """A finished app-bot utterance.
 
-    ``turn_started_at`` is pipecat's ISO timestamp for when the bot's turn
-    began; the event's own ``t`` is when the batch transcript became ready.
+    ``turn_started_at`` is the ISO timestamp of the VAD start voicebox
+    observed for this utterance (claimed in arrival order, like the metrics
+    matcher); the event's own ``t`` is when the batch transcript became ready.
     """
 
     type: EventType = EventType.APP_BOT_TRANSCRIPT
