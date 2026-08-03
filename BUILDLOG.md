@@ -356,3 +356,34 @@ turn).
 
 **Decided:** keep the queue-age lag. The blind spot is documented; the F1 drain moots the
 "safe to stop?" use of the field, which was the strongest reason to change it.
+
+---
+
+## D15 — Every timeout above the drain must outlive the drain
+
+*2026-08-03. Round-4 blind verification, branch `fix/audio-path-and-reporting`.*
+
+**Context:** round 4 lost its entire artifact set. Task F's drain made the child's `stop()`
+legitimately slow (up to the 180 s cap), but two timeouts written before F still assumed a
+fast path: `server.py`'s IPC stop deadline (30 s — the parent timed out, **reaped the child
+mid-drain before `_dump_artifacts` ran**, and returned `{"stopped": true}` with no artifacts),
+and the 90 s turn watchdog (a 116 s narration decoded for 108 s under load — ~0.93× realtime,
+not the probe's idle 0.53× — so the turn closed empty at 90 s and the text re-emitted as an
+orphan event at arrival time).
+
+**Decided:** order the timeouts by what they wait for: decode ≤ drain cap (180 s) < IPC stop
+deadline (210 s) < nothing. Turn watchdog 240 s > drain cap, so any decode the session would
+wait for also beats the watchdog. `server.py` keeps the literal with a comment naming
+`DRAIN_CAP_SECS` rather than importing it — the parent must never load pipecat (hot-reload
+contract).
+
+**Also landed:** a per-session `agent-debug.log` (DEBUG sink next to the artifacts when
+`record_dir` is set). Round 4 measured a ~25 s transcript-lag floor on even 4 s utterances;
+Task C's `voicebox.timing` lines exist to attribute exactly that but died with the terminal.
+Next round reads them from the artifact directory.
+
+**Rejected:** importing `DRAIN_CAP_SECS` into `server.py` for a single literal (breaks the
+parent's pipecat-free property); "fixing" the tester-reported slow barge-in arm — re-reading
+its own timestamps, the arm landed ~1.5 s after the MCP call and the missed utterance was the
+tester's own turnaround (it armed after Ember had already started speaking). Not a defect
+until the new debug log says otherwise.
