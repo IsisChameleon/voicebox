@@ -29,6 +29,11 @@ Intercepting ``run_stt`` rather than re-implementing
 ``_handle_user_stopped_speaking`` means the segment framing — the WAV container
 the base class builds — is never copied into this repo, so it cannot drift from
 the pipecat we run against. See ``BUILDLOG.md`` D5.
+
+The worker alone is not enough for faster-whisper: its decode is lazy, so the
+CPU work escapes pipecat's ``asyncio.to_thread`` and lands back on the event
+loop. ``EagerSegmentsWhisperModel`` closes that second hole — see its
+docstring. ``BUILDLOG.md`` D8.
 """
 
 import asyncio
@@ -39,6 +44,44 @@ from collections.abc import AsyncGenerator
 from loguru import logger
 from pipecat.frames.frames import CancelFrame, EndFrame, Frame, StartFrame
 from pipecat.services.stt_service import SegmentedSTTService
+
+
+class EagerSegmentsWhisperModel:
+    """Materializes faster-whisper's lazy segments inside the calling thread.
+
+    ``WhisperModel.transcribe`` returns a LAZY generator: the call itself does
+    almost no work, and the decode runs while the segments are iterated.
+    pipecat's ``WhisperSTTService.run_stt`` wraps only the ``transcribe`` call
+    in ``asyncio.to_thread`` and then iterates on the event loop — measured on
+    a real 40 s utterance: the call returned in 35 ms and iteration froze the
+    loop for 21.2 s. With the segments materialized inside ``to_thread`` the
+    same decode left the loop free (max stall 55 ms).
+
+    Wrapping the model rather than overriding ``run_stt`` keeps pipecat's own
+    post-processing (no-speech filtering, frame construction) untouched.
+    """
+
+    def __init__(self, model):
+        """Wrap a ``faster_whisper.WhisperModel``.
+
+        Args:
+            model: The real model whose ``transcribe`` output to materialize.
+
+        """
+        self._model = model
+
+    def transcribe(self, *args, **kwargs):
+        """Transcribe and exhaust the segments before returning.
+
+        pipecat calls this via ``asyncio.to_thread``, so the ``list()`` — the
+        actual decode — runs on that worker thread, not on the event loop.
+
+        Returns:
+            ``(segments, info)`` with ``segments`` a fully-decoded list.
+
+        """
+        segments, info = self._model.transcribe(*args, **kwargs)
+        return list(segments), info
 
 
 class NonBlockingSegmentedSTT(SegmentedSTTService):

@@ -181,7 +181,11 @@ async def listen(timeout: float = 30.0, cursor: int = 0) -> dict:
     the advancing cursor and act on ``app_bot_transcript`` events.
 
     Args:
-        timeout: Max seconds to wait for a new event past ``cursor``.
+        timeout: Max seconds to wait for a new event past ``cursor``. Keep it
+            at or below 45: MCP clients commonly cap a tool call's HTTP
+            request at ~60 s, and a longer ``listen`` hits that cap and
+            surfaces as "The operation timed out." instead of the documented
+            empty-``events`` return. Prefer polling in a cursor loop.
         cursor: Event-log position from the previous call (0 = from start).
 
     Returns:

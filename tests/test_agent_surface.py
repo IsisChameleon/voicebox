@@ -94,3 +94,36 @@ async def test_listen_envelope_reports_transcription_lag():
 
     assert envelope["transcription_lag_secs"] == 2.718
     assert envelope["events"] == [] and envelope["cursor"] == 0
+
+
+def test_whisper_model_is_wrapped_eager(monkeypatch: pytest.MonkeyPatch):
+    # faster-whisper's lazy decode escapes pipecat's to_thread and freezes the
+    # event loop for the whole decode (measured 21 s on a 40 s utterance).
+    # _load must wrap the model so the decode happens inside the thread.
+    from pipecat.services.whisper.stt import WhisperSTTService
+
+    from voicebox.processors.nonblocking_whisper_stt import EagerSegmentsWhisperModel
+
+    def load_stub_model(self):
+        self._model = object()  # stands in for a loaded WhisperModel
+
+    monkeypatch.setattr(WhisperSTTService, "_load", load_stub_model)
+    service = agent_module._NonBlockingWhisperSTTService(
+        settings=WhisperSTTService.Settings(model="stub"), device="cpu", compute_type="int8"
+    )
+
+    assert isinstance(service._model, EagerSegmentsWhisperModel)
+
+
+def test_turn_stop_timeout_outlives_batch_stt():
+    # pipecat's 5 s watchdog default assumes streaming STT. Batch Whisper
+    # delivers text ~0.5x realtime AFTER the VAD stop, so at 5 s every long
+    # turn was force-closed empty and the late transcript re-opened a turn
+    # stamped at arrival time (turn_started_at lied by 25-34 s live).
+    from pipecat.processors.aggregators.llm_context import LLMContext
+
+    agent = PipecatMCPAgent(transport=None)  # type: ignore[arg-type]
+    user_aggregator, _ = agent._create_context_aggregators(LLMContext())
+
+    assert user_aggregator._params.user_turn_stop_timeout == agent_module.TURN_STOP_TIMEOUT_SECS
+    assert agent_module.TURN_STOP_TIMEOUT_SECS >= 60.0

@@ -17,7 +17,10 @@ from pipecat.services.stt_service import SegmentedSTTService
 from pipecat.utils.time import time_now_iso8601
 from pipecat.workers.runner import WorkerRunner
 
-from voicebox.processors.nonblocking_whisper_stt import NonBlockingSegmentedSTT
+from voicebox.processors.nonblocking_whisper_stt import (
+    EagerSegmentsWhisperModel,
+    NonBlockingSegmentedSTT,
+)
 
 RATE = 16000
 CHUNK = 3200  # 0.1 s of 16-bit mono @ 16 kHz
@@ -203,3 +206,26 @@ async def test_teardown_leaves_no_worker_running():
         assert stt._worker is not None and not stt._worker.done()
 
     assert stt._worker is None
+
+
+def test_eager_model_decodes_inside_the_transcribe_call():
+    # faster-whisper's transcribe() is lazy: the decode runs while the
+    # segments are iterated. pipecat only puts the transcribe() CALL on a
+    # thread, so a lazy result hands the decode back to the event loop.
+    # The wrapper must exhaust the generator before returning.
+    consumed: list[int] = []
+
+    def lazy_segments():
+        for i in range(3):
+            consumed.append(i)
+            yield f"seg-{i}"
+
+    class _LazyModel:
+        def transcribe(self, audio, **kwargs):
+            return lazy_segments(), {"language": "en"}
+
+    segments, info = EagerSegmentsWhisperModel(_LazyModel()).transcribe(b"pcm", language="en")
+
+    assert consumed == [0, 1, 2]  # decoded during the call, nothing left lazy
+    assert segments == ["seg-0", "seg-1", "seg-2"]
+    assert info == {"language": "en"}

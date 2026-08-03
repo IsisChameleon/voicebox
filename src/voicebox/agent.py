@@ -78,7 +78,10 @@ from voicebox.events import (
 )
 from voicebox.metrics import compute_metrics
 from voicebox.processors.kokoro_tts import KokoroTTSService
-from voicebox.processors.nonblocking_whisper_stt import NonBlockingSegmentedSTT
+from voicebox.processors.nonblocking_whisper_stt import (
+    EagerSegmentsWhisperModel,
+    NonBlockingSegmentedSTT,
+)
 from voicebox.raw_pcm_serializer import RawPCMSerializer
 from voicebox.runner_args import BrowserShimRunnerArguments
 from voicebox.timing import TimedSTTMixin, TimedTurnAnalyzerMixin, log_duration
@@ -96,6 +99,17 @@ VAD_STOP_SECS = 1.0
 # (played=False plus a reason), not an exception, so waiting minutes to raise
 # something uninformative buys nothing.
 PLAYOUT_TIMEOUT_SECS = 30.0
+
+# How long the aggregator's watchdog lets a user turn sit stopped-but-textless
+# before force-closing it. pipecat's 5 s default assumes streaming STT, where a
+# transcript trails speech by well under a second. Ours is batch Whisper at
+# ~0.5x realtime on CPU: a 40 s narration decodes for ~21 s AFTER the VAD stop,
+# so at 5 s the watchdog closed every long turn empty, and the late transcript
+# then opened a fresh turn stamped at transcript-arrival time — which is how
+# `turn_started_at` came to lie by 25-34 s in the round-1 verification session.
+# 90 s covers the decode of a ~170 s narration; a genuinely transcript-less
+# turn still closes, just later.
+TURN_STOP_TIMEOUT_SECS = 90.0
 
 # Kokoro's playout reaches the transport in segments separated by sub-second
 # gaps, so pipecat emits a BotStarted/StoppedSpeakingFrame PAIR per segment.
@@ -123,6 +137,17 @@ class _NonBlockingWhisperSTTService(  # type: ignore[misc]
     NonBlockingSegmentedSTT, TimedSTTMixin, WhisperSTTService
 ):
     """faster-whisper STT, transcribing off the frame task, timed at DEBUG."""
+
+    def _load(self):
+        """Load the model, then make its lazy decode eager (in-thread).
+
+        Without the wrap, faster-whisper's decode escapes pipecat's
+        ``asyncio.to_thread`` and freezes the event loop for the duration
+        (measured 21 s on a 40 s utterance) — see ``EagerSegmentsWhisperModel``.
+        """
+        super()._load()
+        if self._model is not None:
+            self._model = EagerSegmentsWhisperModel(self._model)  # type: ignore[assignment]
 
 
 class _NonBlockingWhisperSTTServiceMLX(  # type: ignore[misc]
@@ -744,6 +769,10 @@ class PipecatMCPAgent:
         return LLMContextAggregatorPair(
             context,
             user_params=LLMUserAggregatorParams(
+                # Batch Whisper delivers the transcript long after the VAD
+                # stop; at the 5 s default the watchdog force-closed the turn
+                # first (see TURN_STOP_TIMEOUT_SECS).
+                user_turn_stop_timeout=TURN_STOP_TIMEOUT_SECS,
                 user_turn_strategies=UserTurnStrategies(
                     # The "user" of this pipeline is the REMOTE BOT (its audio
                     # is our input). The default start strategies ship with
