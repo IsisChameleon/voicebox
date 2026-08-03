@@ -26,6 +26,22 @@ Live-only (🔴) acceptance stories across all tasks need a running voice app on
 `localhost:3000` and are collected in the execution spec; they are the checklist for the next
 dogfood session, not part of any task's ✅.
 
+## Blind verification rounds (live, between Task E and Task F)
+
+Fresh, spec-blind tester agents drive the MCP tools against EmberTales; each round's findings
+are diagnosed, fixed and committed before the next.
+
+| Round | Fix commits | Evidence | Done |
+|---|---|---|---|
+| **1** | `f1bd16c` (D7), `861cf3e` (D8+D9: eager Whisper decode, 90 s turn-stop watchdog) | [r1-blind-verification.md](../artefacts/fix-audio-path-and-reporting/r1-blind-verification.md) | ✅ |
+| **2** | — | — | ⬜ |
+| **3** (stretched scenario) | — | — | ⬜ |
+
+Round 1 confirmed A3/A4 and D3 live, confirmed the specced F and G holes, answered **C3**
+(the ~24 s lag is Whisper's lazy decode freezing the event loop — not smart-turn inference,
+so the conditional follow-up stays off), and surfaced the 5 s turn-stop watchdog corrupting
+`turn_started_at`. Details and probe output in the evidence artefact.
+
 ## Try it
 
 ```bash

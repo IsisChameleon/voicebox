@@ -196,3 +196,62 @@ no file: they fail closed and block a run that would otherwise proceed.
 **Consequence:** `scripts/smoke_browser_shim.py` is the one remaining scripted driver (audio
 path only, no app needed). Live e2e coverage is session-driven; test-account credentials no
 longer live in the repo.
+
+---
+
+## D8 — Whisper's lazy decode is made eager inside the thread; this closes C3
+
+*2026-08-03. Round-1 blind verification, branch `fix/audio-path-and-reporting`.*
+
+**Context:** the round-1 live session showed app-bot transcripts arriving 25–59 s after speech
+stopped, `transcription_lag_secs` pinned at 0.0 throughout, and `speak()` audio starting 4–12 s
+after the call. faster-whisper's `WhisperModel.transcribe` returns a **lazy** generator;
+pipecat's `WhisperSTTService.run_stt` wraps only the `transcribe()` call in `asyncio.to_thread`
+and then iterates the segments on the event loop — so the entire decode runs ON the loop.
+Measured on a real 40 s Ember narration from the session recording
+(`probe_lazy_whisper.py`, output in the round-1 artefact): the call returned in 35 ms,
+iteration took 21.2 s with a 21.24 s max loop stall; the eager shape took the same 22.8 s but
+inside the thread, max loop stall 55 ms.
+
+**Decided:** wrap the loaded model in `EagerSegmentsWhisperModel`
+(`processors/nonblocking_whisper_stt.py`), whose `transcribe()` materializes the segments
+before returning — so the decode happens inside pipecat's own `to_thread` call. Wired via a
+`_load()` override in `_NonBlockingWhisperSTTService`.
+
+**Why this closes C3:** the ~24 s per-turn lag the triage could not attribute is Whisper decode
+(~0.5× realtime on this CPU for long narrations), not `LocalSmartTurnAnalyzerV3`. The
+conditional follow-up in the execution spec ("drop `TurnAnalyzerUserTurnStopStrategy` if the
+24 s is smart-turn inference") is therefore **not triggered**.
+
+**Why the loop freeze mattered beyond lag:** it re-broke Task E live (the worker task still
+froze the loop, so `speak()` stalled behind decode), and it made `transcription_lag_secs`
+unreadable (nothing could observe the queue mid-freeze — every `listen()` reported 0.0).
+
+**Rejected:** overriding `run_stt` to do the whole transcription differently — copies pipecat's
+post-processing (D5's precedent applies). Also rejected: wrapping the MLX path; checked —
+`mlx_whisper.transcribe` returns a plain dict, already eager.
+
+---
+
+## D9 — The aggregator's turn-stop watchdog is raised from 5 s to 90 s
+
+*2026-08-03. Round-1 blind verification, branch `fix/audio-path-and-reporting`.*
+
+**Context:** round 1 showed `app_bot_transcript.turn_started_at` reporting transcript-*arrival*
+time, off by 25–34 s from the acoustic turn start. Traced in pipecat source
+(`turns/user_turn_controller.py`): the `UserTurnController` watchdog force-stops a turn after
+`user_turn_stop_timeout` (default **5 s**) of frame inactivity. With batch Whisper the
+transcript arrives long after the VAD stop, so the watchdog closed every long turn *empty*
+(the empty `UserTurnStoppedMessage` is then swallowed by the `if message.content:` gate — Task
+F's F2 hole, independently confirmed); the late transcript then triggered
+`TranscriptionUserTurnStartStrategy`, opening a fresh turn stamped at arrival time, which
+stopped seconds later with the text. Hence `turn_started_at` ≈ event `t`.
+
+**Decided:** `user_turn_stop_timeout=TURN_STOP_TIMEOUT_SECS` (90 s) on
+`LLMUserAggregatorParams`. 90 s covers the decode of a ~170 s narration at the measured ~0.5×
+realtime; a genuinely transcript-less turn still closes, just later.
+
+**Rejected:** stamping `turn_started_at` ourselves from observed VAD events — re-implements the
+aggregator's bookkeeping and drifts from it; the parameter fixes the cause. Also rejected:
+removing `TranscriptionUserTurnStartStrategy` — with the watchdog fixed it is again the
+harmless fallback pipecat documents.
