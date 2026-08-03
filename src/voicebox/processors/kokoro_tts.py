@@ -22,7 +22,7 @@ from pipecat.frames.frames import (
     TTSStoppedFrame,
 )
 from pipecat.services.settings import TTSSettings
-from pipecat.services.tts_service import TTSService
+from pipecat.services.tts_service import TextAggregationMode, TTSService
 from pipecat.transcriptions.language import Language, resolve_language
 from pipecat.utils.tracing.service_decorators import traced_tts
 from pydantic import BaseModel
@@ -124,8 +124,19 @@ class KokoroTTSService(TTSService):
         # 1.3.0 validates that store-mode settings have no NOT_GIVEN fields:
         # supply model/voice/language (model=None — Kokoro loads a local file,
         # it has no model-name concept).
+        #
+        # TOKEN aggregation: the default SENTENCE mode splits a multi-sentence
+        # speak() into one run_tts call PER SENTENCE, and any sentence whose
+        # synthesis lags the previous one's playout becomes real silence in the
+        # synthetic mic — round 6 measured gaps up to 11.5 s, the app answered
+        # the first fragment, and wait_for_playout resolved at the first
+        # sentence's TTSStoppedFrame. voicebox queues exactly ONE LLMTextFrame
+        # per speak() (agent._queue_speak_frames), so TOKEN mode hands the
+        # whole utterance to one run_tts call, whose buffering (Task G) then
+        # covers it end to end: one gap-free span, one TTSStarted/Stopped pair.
         super().__init__(
             settings=TTSSettings(model=None, voice=voice_id, language=params.language),
+            text_aggregation_mode=TextAggregationMode.TOKEN,
             **kwargs,
         )
 

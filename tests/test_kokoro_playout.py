@@ -90,6 +90,24 @@ async def test_tts_frames_still_bracket_and_error_path_closes():
     assert any(type(f).__name__ == "ErrorFrame" for f in frames)
 
 
+async def test_multi_sentence_speak_is_one_synthesis_call():
+    # Round 6: SENTENCE aggregation split a 3-sentence speak() into three
+    # run_tts calls with real silent gaps between them (up to 11.5 s under
+    # CPU contention) — the app answered the first fragment. voicebox sends
+    # one LLMTextFrame per utterance, so TOKEN mode must hand the whole text
+    # to a single synthesis call.
+    service = KokoroTTSService(voice_id="af_heart")
+
+    texts = [
+        aggregation.text
+        async for aggregation in service._text_aggregator.aggregate(
+            "Hello Ember, lovely to meet you. Please read me the story. Give me choices."
+        )
+    ]
+
+    assert texts == ["Hello Ember, lovely to meet you. Please read me the story. Give me choices."]
+
+
 async def test_warm_up_consumes_one_synthesis():
     # Round 5: the session's FIRST synthesis carried ~5 s of one-time ONNX
     # cost, landing mid-utterance and splitting the first speak() into two

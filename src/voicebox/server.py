@@ -279,6 +279,13 @@ async def stop() -> dict:
     down the voice agent. Also closes the Playwright-controlled browser
     if one is active (started via ``start_browser_session``).
 
+    Teardown drains any transcriptions still in flight before writing the
+    artifacts, so on a long session it can block for a minute or more — if
+    your MCP client caps a tool call at ~60 s, this call may time out on
+    your side while the teardown still completes: the artifact files land
+    in ``record_dir`` regardless, so poll that directory instead of
+    retrying ``stop()``.
+
     Returns:
         ``{"stopped": true}``. When the session ran with ``record_dir``, also
         ``"artifacts"`` with the absolute paths written for review:
