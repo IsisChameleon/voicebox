@@ -34,7 +34,7 @@ are diagnosed, fixed and committed before the next.
 | Round | Fix commits | Evidence | Done |
 |---|---|---|---|
 | **1** | `f1bd16c` (D7), `861cf3e` (D8+D9: eager Whisper decode, 90 s turn-stop watchdog) | [r1-blind-verification.md](../artefacts/fix-audio-path-and-reporting/r1-blind-verification.md) | ✅ |
-| **2** | — | — | ⬜ |
+| **2** | `2d7646d` (D10+D11: turn starts stamped from own VAD log, lag-sampling settle) | [r2-blind-verification.md](../artefacts/fix-audio-path-and-reporting/r2-blind-verification.md) | ✅ |
 | **3** (stretched scenario) | — | — | ⬜ |
 
 Round 1 confirmed A3/A4 and D3 live, confirmed the specced F and G holes, answered **C3**

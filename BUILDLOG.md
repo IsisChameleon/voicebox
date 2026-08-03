@@ -255,3 +255,46 @@ realtime; a genuinely transcript-less turn still closes, just later.
 aggregator's bookkeeping and drifts from it; the parameter fixes the cause. Also rejected:
 removing `TranscriptionUserTurnStartStrategy` — with the watchdog fixed it is again the
 harmless fallback pipecat documents.
+
+---
+
+## D10 — `turn_started_at` is stamped from voicebox's own VAD log after all (reverses part of D9's rejection)
+
+*2026-08-03. Round-2 blind verification, branch `fix/audio-path-and-reporting`.*
+
+**Context:** D9 fixed the watchdog case but round 2 showed 7/14 transcripts still carrying
+arrival-time turn starts (off by up to 103 s). The remaining case: during a bot monologue,
+chunk N+1 VAD-starts while chunk N's transcript is still in Whisper. The turn is then still
+open, so the VAD start cannot open a new one; when chunk N's transcript closes the turn,
+chunk N+1's *transcript arrival* is what re-opens it — stamped at arrival. First-of-monologue
+transcripts were correct, later ones were not; the tester's report showed exactly that split.
+
+**Decided:** the transcript event claims the earliest unclaimed VAD start from the agent's own
+observer log (`_unclaimed_bot_speech_starts`, arrival-ordered) — the very thing D9 rejected.
+D9's rejection assumed the aggregator's stamp was fixable by configuration; round 2 proved the
+overlap case is structural under batch STT, so voicebox's log is the only correct source.
+The aggregator's stamp remains as fallback when the deque is empty.
+
+**Consequence:** the claim rule and its bias are the same as `metrics._match_app_transcripts`
+(D2): a segment Whisper returns nothing for shifts later claims by one interval. Task F's
+empty-transcript events will make those segments claim their own start, shrinking the bias.
+
+---
+
+## D11 — `listen()` settles 50 ms before sampling `transcription_lag_secs`
+
+*2026-08-03. Round-2 blind verification, branch `fix/audio-path-and-reporting`.*
+
+**Context:** every `listen()` woken by an `app_bot_speech_stopped` event read
+`transcription_lag_secs: 0.0` — deterministically, because the observer appends the event at
+the VADProcessor→STT hop, waking the listener before the STT has processed that same frame and
+queued the segment. The caller reads "nothing pending" at the exact moment a transcript is
+guaranteed to be pending.
+
+**Decided:** when the returned batch contains a speech stop, sleep 50 ms before sampling the
+lag.
+
+**Rejected:** recomputing the lag from the event log (age of the oldest speech stop without a
+matching transcript). More truthful in principle, but until Task F emits empty-transcript
+events, a segment Whisper returns nothing for would inflate that lag for the rest of the
+session — lying in the opposite direction. Revisit after F if the 50 ms window ever bites.
