@@ -18,7 +18,7 @@ Task breakdown and success criteria:
 | **C** | Phase-0 timing instrumentation; attributes the unexplained ~24 s per-turn lag | `11090da` | [t-c-timing-instrumentation.md](../artefacts/fix-audio-path-and-reporting/t-c-timing-instrumentation.md) | ✅ |
 | **D** | VAD moves upstream of the STT (90 % of speech was trimmed before Whisper) | `ad93dd4` | [t-d-vad-upstream.md](../artefacts/fix-audio-path-and-reporting/t-d-vad-upstream.md) | ✅ |
 | **E** | Transcription leaves the frame path (non-blocking Whisper worker) | `32b1d6c` | [t-e-nonblocking-stt.md](../artefacts/fix-audio-path-and-reporting/t-e-nonblocking-stt.md) | ✅ |
-| **F** | Transcript-loss holes closed (drain STT before writing artefacts) | — | — | ⬜ |
+| **F** | Transcript-loss holes closed (drain STT before writing artefacts) | `5d67578` | [t-f-transcript-loss-holes.md](../artefacts/fix-audio-path-and-reporting/t-f-transcript-loss-holes.md) | ✅ |
 | **G** | Kokoro plays one utterance as one turn (no mid-utterance silence) | — | — | ⬜ |
 | **H** | `listen()` batches time-ordered; docstrings state what timestamps mean | — | — | ⬜ |
 
@@ -194,3 +194,26 @@ use a deterministic stub analyzer. Full list in the evidence artefact.
 **Not covered:** E5 🔴 needs a live app. The MLX path is wired but unexercised on Linux. Nothing
 drains the queue at teardown yet — a transcription in flight when `stop()` runs is still lost;
 that is Task F, next. Full list in the evidence artefact.
+
+---
+
+## Task F — the transcript-loss holes are closed
+
+*Commit `5d67578`. Criteria: execution spec § "Task F". Criterion 1 adapted — BUILDLOG D13.*
+
+- `stop()` drains the STT queue (`NonBlockingSegmentedSTT.drain`) plus a ≤2 s event-log
+  settle **before** `_dump_artifacts`, so in-flight transcriptions reach `events.json`. The
+  spec's flat ~15 s bound is adapted: round 3 measured a 140 s real backlog, so the budget
+  scales with queued audio (15 s base + 1 s per audio second, 180 s cap — D13). A wedged
+  Whisper logs a warning and teardown proceeds (F3).
+- The `if message.content:` gate is gone: an empty Whisper result emits an
+  `app_bot_transcript` event flagged `transcription_empty: true`, and claims its VAD start so
+  the D10 turn-start deque cannot drift by one for the rest of the session.
+- `metrics.py` needed no change — Task B's `_spoken_transcripts` already refuses empty text
+  for matching (criterion 3 held by construction).
+- `SESSION_STOPPED` is still emitted first; drained transcripts land after it in the log but
+  inside the artifacts (asserted in the F1 test).
+
+**Not covered:** live re-verification of a prompt stop; failed (vs empty) segments still
+surface only as a log line; aggregator-merged utterances remain one event. Full list in the
+evidence artefact.

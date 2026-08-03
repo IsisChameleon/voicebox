@@ -319,3 +319,40 @@ quarantined.
 **Rejected:** an outlier threshold (e.g. drop latencies > 60 s) — a genuinely slow app is
 exactly what voicebox exists to report; only a link-down span is categorically not the app
 being slow. The `client_disconnected` event is the ground truth for that.
+
+---
+
+## D13 — Task F's drain budget scales with the backlog instead of the spec's flat ~15 s
+
+*2026-08-03. Task F, branch `fix/audio-path-and-reporting`.*
+
+**Context:** the execution spec's criterion 1 says `stop()` awaits the STT drain "bounded
+(~15 s)". Round 3 measured a real transcript backlog of **140 s** (long narrations, ~0.55×
+realtime CPU decode, serial queue) — a 15 s bound would have drained one segment and lost the
+other three, defeating F1's whole point on exactly the sessions that need it.
+
+**Decided:** budget = 15 s base + 1 s per second of queued/in-flight audio (bytes tracked in
+`NonBlockingSegmentedSTT`), capped at 180 s. 1 s/audio-second is ~2× the measured decode rate;
+the cap keeps a wedged Whisper from stalling teardown (F3). Spec criterion adapted, not met as
+written — D3/D5 precedent.
+
+**Rejected:** a bigger flat bound (e.g. 180 s always) — it makes the *pathological* case (a
+hung transcription) stall every teardown the full window, while the adaptive budget only waits
+long when there is real work to wait for.
+
+---
+
+## D14 — `transcription_lag_secs` stays queue-age-based; the D11 revisit is closed
+
+*2026-08-03. Task F, branch `fix/audio-path-and-reporting`.*
+
+**Context:** D11 deferred a possible switch to event-log-based lag (age of the oldest speech
+stop without a matching transcript) until F's empty-transcript events made it safe. Round 3
+then showed the aggregator can **merge** two speech intervals into one transcript event (a
+1.2 s and a 127.6 s interval, one event). Count-based matching of stops to transcript events
+therefore under-counts events and would report a permanently-growing lag after any merge —
+strictly worse than the queue-age proxy's known blind spot (decoded text held by an open
+turn).
+
+**Decided:** keep the queue-age lag. The blind spot is documented; the F1 drain moots the
+"safe to stop?" use of the field, which was the strongest reason to change it.
