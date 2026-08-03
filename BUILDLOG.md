@@ -298,3 +298,24 @@ lag.
 matching transcript). More truthful in principle, but until Task F emits empty-transcript
 events, a segment Whisper returns nothing for would inflate that lag for the rest of the
 session — lying in the opposite direction. Revisit after F if the 50 ms window ever bites.
+
+---
+
+## D12 — Gaps spanning a disconnect are outages, not conversation metrics
+
+*2026-08-03. Round-3 blind verification, branch `fix/audio-path-and-reporting`.*
+
+**Context:** twice now an app outage has been averaged into the conversational numbers: round 1
+booked a 431 s outage as an app "response latency", round 3 booked a 107 s wedge (bot goodbye →
+client stuck → page reload) as **both** a dead-air gap and a response latency, dragging
+`mean_app_response_latency_secs` to 17.776 s when the honest per-turn values were 2.9–7.0 s.
+
+**Decided:** a silent gap containing a `client_disconnected` event is quarantined into a new
+`outage_gaps` bucket (`total_outage_secs` in the summary), and a pending tester utterance is
+disarmed by a disconnect so the app's first words after reconnecting record no latency. Bias
+note added. Replayed on the round-3 log: mean latency 17.776 → 5.022 s, the 107.051 s span
+quarantined.
+
+**Rejected:** an outlier threshold (e.g. drop latencies > 60 s) — a genuinely slow app is
+exactly what voicebox exists to report; only a link-down span is categorically not the app
+being slow. The `client_disconnected` event is the ground truth for that.
