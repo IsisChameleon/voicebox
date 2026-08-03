@@ -296,7 +296,13 @@ async def stop() -> dict:
     """
     artifacts = None
     try:
-        response = await send_command("stop", deadline=30.0)
+        # Must outlive the agent's STT drain (DRAIN_CAP_SECS = 180 in
+        # processors/nonblocking_whisper_stt.py — not imported here so the
+        # parent never loads pipecat) plus settle + artifact writing. At the
+        # old 30 s this timed out mid-drain and the reap below killed the
+        # child BEFORE it wrote events.json/metrics.json — verification
+        # round 4 lost its entire artifact set that way.
+        response = await send_command("stop", deadline=210.0)
         artifacts = response.get("artifacts")
     except Exception as e:
         # A hung/dead child still gets reaped below — that's a stop too.

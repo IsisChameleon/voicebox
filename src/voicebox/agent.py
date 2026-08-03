@@ -105,14 +105,14 @@ PLAYOUT_TIMEOUT_SECS = 30.0
 
 # How long the aggregator's watchdog lets a user turn sit stopped-but-textless
 # before force-closing it. pipecat's 5 s default assumes streaming STT, where a
-# transcript trails speech by well under a second. Ours is batch Whisper at
-# ~0.5x realtime on CPU: a 40 s narration decodes for ~21 s AFTER the VAD stop,
-# so at 5 s the watchdog closed every long turn empty, and the late transcript
-# then opened a fresh turn stamped at transcript-arrival time — which is how
-# `turn_started_at` came to lie by 25-34 s in the round-1 verification session.
-# 90 s covers the decode of a ~170 s narration; a genuinely transcript-less
-# turn still closes, just later.
-TURN_STOP_TIMEOUT_SECS = 90.0
+# transcript trails speech by well under a second. Ours is batch Whisper on
+# CPU, and under load the decode approaches ~1x realtime (round 4 measured a
+# 116 s narration decoding for 108 s) — every time the watchdog fires first,
+# the turn closes empty and the late transcript re-emits as an orphan event
+# stamped at arrival time (rounds 1 and 4 both hit this). 240 s outlives the
+# 180 s drain cap, i.e. any decode the session would wait for at all; a
+# genuinely transcript-less turn still closes, just later.
+TURN_STOP_TIMEOUT_SECS = 240.0
 
 
 # The STT services are composed from two mixins, in this order:
@@ -382,6 +382,21 @@ class PipecatMCPAgent:
             return
 
         logger.info("Starting Pipecat MCP Agent pipeline...")
+
+        # A per-session DEBUG log next to the other artifacts, so the
+        # `voicebox.timing` lines (Task C) survive the session — the child's
+        # stderr goes to whatever terminal launched the server and is lost to
+        # any later analysis. This is how a transcript-lag report gets
+        # attributed to a named call instead of guessed at.
+        if self._record_dir:
+            import os
+
+            os.makedirs(self._record_dir, exist_ok=True)
+            logger.add(
+                os.path.join(self._record_dir, "agent-debug.log"),
+                level="DEBUG",
+                mode="w",
+            )
 
         stt = self._stt = self._create_stt_service()
         tts = self._create_tts_service()
