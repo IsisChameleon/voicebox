@@ -19,7 +19,7 @@ Task breakdown and success criteria:
 | **D** | VAD moves upstream of the STT (90 % of speech was trimmed before Whisper) | `ad93dd4` | [t-d-vad-upstream.md](../artefacts/fix-audio-path-and-reporting/t-d-vad-upstream.md) | ✅ |
 | **E** | Transcription leaves the frame path (non-blocking Whisper worker) | `32b1d6c` | [t-e-nonblocking-stt.md](../artefacts/fix-audio-path-and-reporting/t-e-nonblocking-stt.md) | ✅ |
 | **F** | Transcript-loss holes closed (drain STT before writing artefacts) | `5d67578` | [t-f-transcript-loss-holes.md](../artefacts/fix-audio-path-and-reporting/t-f-transcript-loss-holes.md) | ✅ |
-| **G** | Kokoro plays one utterance as one turn (no mid-utterance silence) | — | — | ⬜ |
+| **G** | Kokoro plays one utterance as one turn (no mid-utterance silence) | `57d9527` | [t-g-kokoro-single-turn.md](../artefacts/fix-audio-path-and-reporting/t-g-kokoro-single-turn.md) | ✅ |
 | **H** | `listen()` batches time-ordered; docstrings state what timestamps mean | — | — | ⬜ |
 
 Live-only (🔴) acceptance stories across all tasks need a running voice app on
@@ -217,3 +217,25 @@ that is Task F, next. Full list in the evidence artefact.
 **Not covered:** live re-verification of a prompt stop; failed (vs empty) segments still
 surface only as a log line; aggregator-merged utterances remain one event. Full list in the
 evidence artefact.
+
+---
+
+## Task G — Kokoro plays one utterance, not several
+
+*Commit `57d9527`. Criteria: execution spec § "Task G".*
+
+- `run_tts` consumes the whole synthesis stream before yielding any audio, back-to-back —
+  the CPU gap between chunks (1.6–4.2 s live) can no longer become silence in the synthetic
+  mic, so the app hears one user turn per `speak()`. Round 3's worst case (Ember endpointed
+  on a 4.2 s gap, took the turn, and scolded the tester) is the reproduction this kills.
+- `_Playout` resolves on the first `BotStoppedSpeakingFrame` after the utterance's
+  `TTSStoppedFrame` (the observer now watches `TTSStoppedFrame`, no event emitted) — round 2
+  caught the old 1.0 s settle timer resolving 4 s before the audio ended.
+  `PLAYOUT_SETTLE_SECS` and the settle machinery are deleted. Interruption still resolves
+  immediately.
+- Side effect at the source: the phantom `transcript_missing` tester turns (3 per session in
+  rounds 2–3) disappear — they were the splits' second intervals.
+
+**Not covered:** G4 🔴 (the app logs one user turn) and the speak-latency delta are queued
+for the post-G blind round; the barge-in synthesize-at-arm idea stays a recorded follow-up.
+Full list in the evidence artefact.
