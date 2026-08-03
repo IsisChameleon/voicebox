@@ -21,8 +21,8 @@ Fix the verified bugs so the existing 4-tool surface behaves as documented.
 | 0.4 | shim: support repeated `getUserMedia(audio)` calls — keep all live generators, fan inbound Kokoro frames out to each (drop ended tracks) | `shim.js` | smoke script extended: call `getUserMedia` twice, assert both tracks receive audio (`__voiceShim.perTrackBytes`) |
 | 0.5 | Remove the fake-speech disconnect sentinel (`"I just disconnected…"`); interim: return it via a distinguishable key until Stage 2 events exist | `agent.py` | kill the page mid-listen; `listen` result is identifiable as a disconnect, not a transcript |
 
-**Exit criteria:** all of `scripts/smoke_browser_shim.py` and `scripts/e2e_readme_call.py` pass;
-talk-over audio is physically possible.
+**Exit criteria:** `scripts/smoke_browser_shim.py` passes and a live e2e call against the
+readme app succeeds; talk-over audio is physically possible.
 
 ## Stage 1 — Full-duplex IPC (foundation)
 

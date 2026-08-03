@@ -171,3 +171,28 @@ defects: each path stays internally consistent, per-path tests pass, and the Mac
 
 **Consequence:** the MLX path is wired but unexercised — this machine is Linux, and no test in
 the suite constructs the MLX service. Stated here so it is not mistaken for verified.
+
+---
+
+## D7 — Remove `scripts/e2e_readme_call.py`
+
+*2026-08-03. Branch: `fix/audio-path-and-reporting`. User-directed.*
+
+**Context:** the first blind verification round was blocked at login: the script's hardcoded
+test-account password had drifted from the app's local database (the checked-in value had a
+lowercase first letter). The user corrected the password and asked for the script itself to be
+removed from the repo.
+
+**Decided:** delete the script and scrub the living docs that pointed at it (`CLAUDE.md` file
+map + dev workflow + quality-checks note, `README.md` examples, the upgrade roadmap's exit
+criteria). Historical documents (`notes.md`, `docs/superpowers/specs/`) keep their mentions —
+they record what was true when written.
+
+**Why:** the script was a hardcoded-credential, single-app driver whose job — a full
+login → call → conversation → teardown pass — is now done by live dogfood/blind-verification
+sessions driving the MCP tools directly. Stale credentials in a checked-in file are worse than
+no file: they fail closed and block a run that would otherwise proceed.
+
+**Consequence:** `scripts/smoke_browser_shim.py` is the one remaining scripted driver (audio
+path only, no app needed). Live e2e coverage is session-driven; test-account credentials no
+longer live in the repo.
