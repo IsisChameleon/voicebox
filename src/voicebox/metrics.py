@@ -28,15 +28,18 @@ def compute_metrics(events: list[dict], vad_stop_secs: float) -> dict:
     app_intervals = _intervals(events, "app_bot_speech_started", "app_bot_speech_stopped", close_at)
     tester_intervals = _tester_intervals(events, close_at)
 
+    disconnects = [e["t"] for e in events if e["type"] == "client_disconnected"]
+
     app_latencies = _app_response_latencies(events, app_intervals)
     latencies = [latency for latency in app_latencies if latency is not None]
 
     talk_over = _overlaps(tester_intervals, app_intervals)
     total_talk_over = round(sum(w["duration_secs"] for w in talk_over), 3)
 
-    dead_air, think_time = _gaps(tester_intervals, app_intervals)
+    dead_air, think_time, outages = _gaps(tester_intervals, app_intervals, disconnects)
     total_dead_air = round(sum(g["duration_secs"] for g in dead_air), 3)
     total_think_time = round(sum(g["duration_secs"] for g in think_time), 3)
+    total_outage = round(sum(g["duration_secs"] for g in outages), 3)
 
     tester_secs = round(sum(stop - start for start, stop in tester_intervals), 3)
     app_bot_secs = round(sum(stop - start for start, stop in app_intervals), 3)
@@ -51,6 +54,7 @@ def compute_metrics(events: list[dict], vad_stop_secs: float) -> dict:
         "talk_over_windows": talk_over,
         "dead_air_gaps": dead_air,
         "tester_think_time_gaps": think_time,
+        "outage_gaps": outages,
         "talk_time": {
             "tester_secs": tester_secs,
             "app_bot_secs": app_bot_secs,
@@ -67,6 +71,7 @@ def compute_metrics(events: list[dict], vad_stop_secs: float) -> dict:
             "total_talk_over_secs": total_talk_over,
             "total_dead_air_secs": total_dead_air,
             "total_tester_think_time_secs": total_think_time,
+            "total_outage_secs": total_outage,
         },
     }
 
@@ -110,13 +115,17 @@ def _app_response_latencies(
     and get ``None``. The timer is (re)armed on every ``tester_speech_stopped``
     /``_interrupted``: if the tester stops again before the bot speaks, the
     latest stop wins; once the bot speaks it disarms until the tester stops
-    again.
+    again. A ``client_disconnected`` in between disarms it too: the reply
+    never came in that connection, and the app's first words after a
+    reconnect are a fresh session, not a 100 s "latency".
     """
     by_start: dict[float, float] = {}
     pending_tester_stop: float | None = None
     for e in events:
         if e["type"] in ("tester_speech_stopped", "tester_speech_interrupted"):
             pending_tester_stop = e["t"]
+        elif e["type"] == "client_disconnected":
+            pending_tester_stop = None
         elif e["type"] == "app_bot_speech_started" and pending_tester_stop is not None:
             by_start[e["t"]] = round(e["t"] - pending_tester_stop, 3)
             pending_tester_stop = None
@@ -177,6 +186,9 @@ _BIAS_NOTES = [
     "is VAD-onset (~tens of ms lag, unaffected by vad_stop_secs).",
     "app_bot_transcript text arrives after batch Whisper and is utterance-level, not "
     "word-accurate.",
+    "a silent gap containing a client_disconnected is an outage_gap, not dead air or "
+    "think time, and a tester utterance answered only after a disconnect contributes "
+    "no response latency — the call was down, not slow.",
 ]
 
 
@@ -292,29 +304,37 @@ def _turns(
 
 
 def _gaps(
-    tester_intervals: list[tuple[float, float]], app_intervals: list[tuple[float, float]]
-) -> tuple[list[dict], list[dict]]:
+    tester_intervals: list[tuple[float, float]],
+    app_intervals: list[tuple[float, float]],
+    disconnects: list[float],
+) -> tuple[list[dict], list[dict], list[dict]]:
     """Split the silent spans by who owed the next turn.
 
-    Returns ``(app_dead_air, tester_think_time)``. Silence after a tester
-    utterance is the app being slow to answer; silence after an app utterance
-    is the driving agent deciding what to say next. Overlapping speech is
-    merged as before, and the gap belongs to whoever's interval ends furthest
-    right.
+    Returns ``(app_dead_air, tester_think_time, outages)``. Silence after a
+    tester utterance is the app being slow to answer; silence after an app
+    utterance is the driving agent deciding what to say next. A gap containing
+    a ``client_disconnected`` is neither — the call was down — and is
+    quarantined as an outage so it cannot pollute the conversational totals.
+    Overlapping speech is merged as before, and the gap belongs to whoever's
+    interval ends furthest right.
     """
     ordered = sorted(
         [(start, stop, "tester") for start, stop in tester_intervals]
         + [(start, stop, "app_bot") for start, stop in app_intervals]
     )
     if not ordered:
-        return [], []
+        return [], [], []
     app_dead_air: list[dict] = []
     tester_think_time: list[dict] = []
+    outages: list[dict] = []
     cursor, owed_by_app = ordered[0][1], ordered[0][2] == "tester"
     for start, stop, speaker in ordered[1:]:
         if start > cursor:
             gap = {"start": cursor, "end": start, "duration_secs": round(start - cursor, 3)}
-            (app_dead_air if owed_by_app else tester_think_time).append(gap)
+            if any(cursor <= t < start for t in disconnects):
+                outages.append(gap)
+            else:
+                (app_dead_air if owed_by_app else tester_think_time).append(gap)
         if stop > cursor:
             cursor, owed_by_app = stop, speaker == "tester"
-    return app_dead_air, tester_think_time
+    return app_dead_air, tester_think_time, outages

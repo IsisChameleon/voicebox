@@ -401,3 +401,51 @@ def test_biases_note_covers_gap_attribution(metrics):
     assert "dead_air_gaps" in notes
     assert "tester_think_time_gaps" in notes
     assert "transcript_missing" in notes
+
+
+# --- outages are quarantined, not averaged in (round 3) ----------------------
+
+
+def test_gap_spanning_disconnect_is_an_outage():
+    # Round 3: the app's bot said goodbye and the client wedged; 107 s passed
+    # before a page reload revived it. That silence was booked as dead air and
+    # its span as a 107 s "response latency" (dragging the mean from ~4.6 s to
+    # 17.8 s). A gap containing a client_disconnected is an outage: the call
+    # was down, nobody was being slow.
+    events = [
+        {"type": "session_started", "t": 0.0, "vad_stop_secs": 1.0, "note": "n"},
+        {"type": "tester_speech_started", "t": 2.0},
+        {"type": "tester_speech_stopped", "t": 4.0},
+        {"type": "client_disconnected", "t": 10.0},
+        {"type": "client_connected", "t": 80.0},
+        {"type": "app_bot_speech_started", "t": 111.0},
+        {"type": "app_bot_speech_stopped", "t": 113.0},
+        {"type": "session_stopped", "t": 114.0},
+    ]
+    m = compute_metrics(events, 1.0)
+    assert m["outage_gaps"] == [{"start": 4.0, "end": 111.0, "duration_secs": 107.0}]
+    assert m["summary"]["total_outage_secs"] == 107.0
+    assert m["dead_air_gaps"] == [] and m["summary"]["total_dead_air_secs"] == 0.0
+    # The app's first words after the reconnect are a fresh session, not a
+    # 107 s reply: no latency is recorded for that turn.
+    assert m["app_response_latencies_secs"] == []
+    assert m["summary"]["mean_app_response_latency_secs"] is None
+    app_turn = next(t for t in m["turns"] if t["speaker"] == "app_bot")
+    assert "response_latency_secs" not in app_turn
+
+
+def test_gap_without_disconnect_still_attributed_normally():
+    # The quarantine must not leak: an ordinary silence with the link up keeps
+    # its dead-air attribution and its measured latency.
+    events = [
+        {"type": "session_started", "t": 0.0, "vad_stop_secs": 1.0, "note": "n"},
+        {"type": "tester_speech_started", "t": 2.0},
+        {"type": "tester_speech_stopped", "t": 4.0},
+        {"type": "app_bot_speech_started", "t": 16.0},
+        {"type": "app_bot_speech_stopped", "t": 18.0},
+        {"type": "session_stopped", "t": 19.0},
+    ]
+    m = compute_metrics(events, 1.0)
+    assert m["outage_gaps"] == [] and m["summary"]["total_outage_secs"] == 0.0
+    assert m["dead_air_gaps"] == [{"start": 4.0, "end": 16.0, "duration_secs": 12.0}]
+    assert m["app_response_latencies_secs"] == [12.0]
