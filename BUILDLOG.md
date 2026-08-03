@@ -414,3 +414,39 @@ issue #13, deliberately outside this branch (the spec pins the CPU config).
 **Rejected:** buffering across sentence boundaries in the TTS aggregation layer — it would
 re-implement pipecat's sentence segmentation to fix a cost that only ever bites once per
 process, and rounds 4–5 show warm synthesis keeps up with playout.
+
+---
+
+## D17 — TOKEN text aggregation: one `speak()` is one synthesis call (partially reverses D16's rejection)
+
+*2026-08-03. Round-6 blind verification, branch `fix/audio-path-and-reporting`.*
+
+**Context:** round 6 deliberately used multi-sentence utterances and showed Task G's buffering
+is per-`run_tts`-call while pipecat's default SENTENCE aggregation makes one call *per
+sentence*: a 3-sentence speak split into three speech pairs (gaps up to 11.5 s under STT CPU
+contention), the app answered the first fragment and was talked over by the rest, and
+`wait_for_playout` resolved at the first sentence's own `TTSStoppedFrame`. D16 had rejected
+"buffering across sentence boundaries" believing warm synthesis keeps up — it does for short
+single-sentence texts, not for long ones competing with Whisper for CPU.
+
+**Decided:** `text_aggregation_mode=TextAggregationMode.TOKEN` on the Kokoro service. TOKEN
+mode passes each incoming `TextFrame` through whole (verified in
+`SimpleTextAggregator.aggregate`), and voicebox queues exactly one `LLMTextFrame` per
+`speak()` (`_queue_speak_frames`) — so the entire utterance reaches one `run_tts` call, whose
+Task-G buffering then genuinely covers the utterance: one gap-free span, one
+TTSStarted/Stopped pair, correct `_Playout` resolution. No pipecat code re-implemented — this
+is the mode pipecat ships for exactly the "full response arrives at once" shape.
+
+**Also closed with log evidence:** the "slow barge-in arm" (rounds 4–6): the round-6 debug log
+shows `Command 'speak' received, dispatching...` → `tester_barge_in_armed` in **1 ms**. The
+~8.5 s the testers measured is their own LLM turnaround before the call is issued. Guidance
+(Task H docstrings): arm *early* — arming is instantaneous server-side and the trigger only
+fires on events after the arm.
+
+**Deferred with evidence (the aggregator redesign, already out of scope):** round 6's
+turns-4+5 transcript merge desynced both the D10 turn-start deque and metrics' positional
+matcher by one for the rest of the session (including a false `transcript_missing` on the
+final turn), and transcript delivery is structurally one-turn-behind under the current
+`UserTurnController`. Per-segment transcript emission (observer watching `TranscriptionFrame`
+directly, no aggregator) would fix both and delete the watchdog dance — that is the
+"drop `LLMContextAggregatorPair`" design task the execution spec already names.
