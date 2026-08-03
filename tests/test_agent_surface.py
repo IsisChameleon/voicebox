@@ -56,12 +56,12 @@ async def test_successful_playout_reports_played(monkeypatch: pytest.MonkeyPatch
     # played=True is what makes the flag readable: present either way, so a
     # caller branches on it rather than on the absence of a key.
     monkeypatch.setattr(agent_module, "PLAYOUT_TIMEOUT_SECS", 5.0)
-    monkeypatch.setattr(agent_module, "PLAYOUT_SETTLE_SECS", 0.1)
     agent = _agent_ready_to_speak()
 
     async def play_out_shortly():
         await asyncio.sleep(0.1)
         agent._playout.on_started(1.0)  # type: ignore[union-attr]
+        agent._playout.on_tts_stopped()  # type: ignore[union-attr]
         agent._playout.on_stopped(2.0)  # type: ignore[union-attr]
 
     task = asyncio.create_task(play_out_shortly())

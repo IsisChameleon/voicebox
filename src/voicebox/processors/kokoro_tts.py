@@ -168,14 +168,22 @@ class KokoroTTSService(TTSService):
                 text, voice=self._voice_id, lang=self._lang_code, speed=1.0
             )
 
+            # Buffer the WHOLE utterance before yielding any audio (Task G).
+            # Yielding per chunk turned the CPU synthesis gap between chunks
+            # into real silence in the synthetic microphone (1.6-4.2 s
+            # observed), and the app under test heard one utterance as several
+            # user turns — once badly enough that it took the turn mid-sentence
+            # and scolded the tester. Nobody is waiting on time-to-first-byte
+            # from a synthetic user; gap-free playout is the entire point.
+            chunks: list[bytes] = []
             async for samples, sample_rate in stream:
-                await self.stop_ttfb_metrics()
-
                 audio_int16 = (samples * 32767).astype(np.int16).tobytes()
-                audio_data = await self._resampler.resample(
-                    audio_int16, sample_rate, self.sample_rate
+                chunks.append(
+                    await self._resampler.resample(audio_int16, sample_rate, self.sample_rate)
                 )
+            await self.stop_ttfb_metrics()
 
+            for audio_data in chunks:
                 yield TTSAudioRawFrame(
                     audio=audio_data, sample_rate=self.sample_rate, num_channels=1
                 )

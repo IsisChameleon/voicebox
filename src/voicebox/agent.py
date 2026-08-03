@@ -40,6 +40,7 @@ from pipecat.frames.frames import (
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMTextFrame,
+    TTSStoppedFrame,
     VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
@@ -113,13 +114,6 @@ PLAYOUT_TIMEOUT_SECS = 30.0
 # turn still closes, just later.
 TURN_STOP_TIMEOUT_SECS = 90.0
 
-# Kokoro's playout reaches the transport in segments separated by sub-second
-# gaps, so pipecat emits a BotStarted/StoppedSpeakingFrame PAIR per segment.
-# speak(wait_for_playout=True) treats the playout as finished only after the bot has stayed
-# silent this long, so the reported span covers the whole utterance instead of
-# clipping at the first segment.
-PLAYOUT_SETTLE_SECS = 1.0
-
 
 # The STT services are composed from two mixins, in this order:
 #   NonBlockingSegmentedSTT — transcribes on a worker, off the frame task.
@@ -177,6 +171,7 @@ class _PipelineEventObserver(BaseObserver):
         BotStartedSpeakingFrame,
         BotStoppedSpeakingFrame,
         InterruptionFrame,
+        TTSStoppedFrame,
     )
 
     def __init__(self, agent: "PipecatMCPAgent"):
@@ -201,35 +196,39 @@ class _Playout:
 
     The tester's BotStarted/StoppedSpeakingFrame carry no utterance identity,
     so only one waited speak is tracked at a time (guarded by a lock in
-    ``speak``). Because the playout arrives in segments, the future resolves
-    only after the bot has been silent for ``settle_secs`` (so the span covers
-    the whole utterance), reporting first-start to last-stop; an interruption
-    resolves it immediately.
+    ``speak``). Kokoro hands the transport the whole utterance as one gap-free
+    span (Task G), so the playout is over at the first
+    ``BotStoppedSpeakingFrame`` that follows the utterance's
+    ``TTSStoppedFrame`` — no silence timer. An interruption resolves it
+    immediately.
     """
 
-    def __init__(self, settle_secs: float):
+    def __init__(self):
         self._loop = asyncio.get_event_loop()
-        self._settle_secs = settle_secs
         self.future: asyncio.Future[dict] = self._loop.create_future()
         self.started_at: Optional[float] = None
         self._last_stopped_at: Optional[float] = None
         self.interrupted: bool = False
-        self._settle_timer: Optional[asyncio.TimerHandle] = None
+        self._tts_finished: bool = False
 
     def on_started(self, t: float):
-        """Record the first segment's start and cancel any pending resolve."""
+        """Record the playout's first audio start."""
         if self.started_at is None:
             self.started_at = t
-        if self._settle_timer is not None:
-            self._settle_timer.cancel()
-            self._settle_timer = None
+
+    def on_tts_stopped(self):
+        """Mark the utterance fully synthesized and handed to the transport.
+
+        ``TTSStoppedFrame`` travels ahead of the buffered audio's playout, so
+        the next ``BotStoppedSpeakingFrame`` is the audio actually ending.
+        """
+        self._tts_finished = True
 
     def on_stopped(self, t: float):
-        """Record a segment end and (re)arm the settle timer to resolve on silence."""
+        """Record an audio-span end; resolve if the utterance was complete."""
         self._last_stopped_at = t
-        if self._settle_timer is not None:
-            self._settle_timer.cancel()
-        self._settle_timer = self._loop.call_later(self._settle_secs, self._resolve)
+        if self._tts_finished:
+            self._resolve()
 
     def on_interrupted(self, t: float):
         """Barge-in cut the playout short — resolve immediately."""
@@ -240,9 +239,6 @@ class _Playout:
 
     def _resolve(self):
         """Resolve the future with the observed playout span (first → last)."""
-        if self._settle_timer is not None:
-            self._settle_timer.cancel()
-            self._settle_timer = None
         if not self.future.done():
             self.future.set_result(
                 {
@@ -374,6 +370,11 @@ class PipecatMCPAgent:
             if self._playout is not None:
                 self._playout.on_interrupted(event.t)
             await self._emit(event)
+        elif isinstance(frame, TTSStoppedFrame):
+            # No event: this is _Playout bookkeeping (the utterance is fully
+            # synthesized), not something a listen() caller needs to see.
+            if self._playout is not None:
+                self._playout.on_tts_stopped()
 
     async def start(self):
         """Build the pipeline and run it in the background until ``stop()``."""
@@ -735,7 +736,7 @@ class PipecatMCPAgent:
         # utterance identity, so overlapping waited speaks could not be told
         # apart.
         async with self._playout_lock:
-            self._playout = _Playout(PLAYOUT_SETTLE_SECS)
+            self._playout = _Playout()
             try:
                 await self._queue_speak_frames(text)
                 result = await asyncio.wait_for(self._playout.future, timeout=PLAYOUT_TIMEOUT_SECS)
