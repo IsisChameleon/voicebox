@@ -45,6 +45,15 @@ from loguru import logger
 from pipecat.frames.frames import CancelFrame, EndFrame, Frame, StartFrame
 from pipecat.services.stt_service import SegmentedSTTService
 
+# Draining at teardown (Task F): the budget scales with the backlog because a
+# fixed bound loses data — the round-3 session measured a 140 s transcript
+# backlog against the spec's proposed ~15 s. Decode runs at ~0.55x realtime on
+# this CPU (round-1 probe), so 1 s of budget per queued audio second is a ~2x
+# margin; the cap keeps a wedged Whisper from stalling teardown forever.
+DRAIN_BASE_SECS = 15.0
+DRAIN_SECS_PER_AUDIO_SEC = 1.0
+DRAIN_CAP_SECS = 180.0
+
 
 class EagerSegmentsWhisperModel:
     """Materializes faster-whisper's lazy segments inside the calling thread.
@@ -106,6 +115,8 @@ class NonBlockingSegmentedSTT(SegmentedSTTService):
         self._waiting_since: deque[float] = deque()
         self._worker: asyncio.Task | None = None
         self._in_flight_since: float | None = None
+        # Bytes of audio queued or in flight; sizes the drain budget.
+        self._pending_audio_bytes: int = 0
 
     @property
     def transcription_lag_secs(self) -> float:
@@ -161,6 +172,7 @@ class NonBlockingSegmentedSTT(SegmentedSTTService):
 
         """
         self._waiting_since.append(time.time())
+        self._pending_audio_bytes += len(audio)
         await self._segments.put(audio)
         return
         yield  # unreachable; makes this an async generator
@@ -178,4 +190,34 @@ class NonBlockingSegmentedSTT(SegmentedSTTService):
                 logger.error(f"{self}: transcription failed, segment dropped: {e}")
             finally:
                 self._in_flight_since = None
+                self._pending_audio_bytes -= len(audio)
                 self._segments.task_done()
+
+    def drain_budget_secs(self) -> float:
+        """How long a teardown drain may reasonably take, given the backlog.
+
+        Returns:
+            ``DRAIN_BASE_SECS`` plus ``DRAIN_SECS_PER_AUDIO_SEC`` per second of
+            audio still queued or in flight, capped at ``DRAIN_CAP_SECS``.
+
+        """
+        rate = self.sample_rate or 16000  # 0 until StartFrame; Whisper's rate is the default
+        pending_audio_secs = self._pending_audio_bytes / (rate * 2)
+        return min(DRAIN_CAP_SECS, DRAIN_BASE_SECS + DRAIN_SECS_PER_AUDIO_SEC * pending_audio_secs)
+
+    async def drain(self, timeout: float) -> bool:
+        """Wait until every queued segment has been transcribed, bounded.
+
+        Args:
+            timeout: Max seconds to wait for the queue to empty.
+
+        Returns:
+            ``True`` when the queue drained; ``False`` on timeout (a wedged
+            transcription must not hang teardown — Task F criterion 1).
+
+        """
+        try:
+            await asyncio.wait_for(self._segments.join(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False

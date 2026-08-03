@@ -332,7 +332,13 @@ class PipecatMCPAgent:
             )
         else:
             turn_started_at = aggregator_turn_started_at
-        await self._emit(TranscriptEvent(text=text, turn_started_at=turn_started_at))
+        await self._emit(
+            TranscriptEvent(
+                text=text,
+                turn_started_at=turn_started_at,
+                transcription_empty=not text,
+            )
+        )
 
     async def _on_pipeline_frame(self, frame: Frame):
         """Translate an observed pipeline frame into a log event.
@@ -422,8 +428,10 @@ class PipecatMCPAgent:
         @user_aggregator.event_handler("on_user_turn_stopped")
         async def on_user_turn_stopped(aggregator, strategy, message: UserTurnStoppedMessage):
             with log_duration("on_user_turn_stopped"):
-                if message.content:
-                    await self._emit_app_bot_transcript(message.content, message.timestamp)
+                # Emitted even when Whisper recovered nothing (Task F): an
+                # empty-flagged event tells a reader "we tried and got
+                # nothing", where silence would read as "the bot never spoke".
+                await self._emit_app_bot_transcript(message.content or "", message.timestamp)
 
         # Log header: consumers of app_bot_speech_stopped timings need the
         # built-in VAD lag to subtract it.
@@ -479,6 +487,18 @@ class PipecatMCPAgent:
             task.cancel()
         await asyncio.gather(*self._armed_tasks, return_exceptions=True)
 
+        # Drain the STT before writing artifacts (Task F): a transcription
+        # still in flight here used to be cancelled with the pipeline, losing
+        # its text from events.json — a 44.8 s turn in the field report, four
+        # turns (~100 s) in verification round 3. The budget scales with the
+        # backlog (round 3 measured 140 s against the spec's ~15 s guess) and
+        # is capped so a wedged Whisper cannot hang teardown.
+        if self._stt is not None:
+            budget = self._stt.drain_budget_secs()
+            if not await self._stt.drain(timeout=budget):
+                logger.warning(f"STT drain incomplete after {budget:.1f}s; artifacts may be short")
+            await self._settle_event_log()
+
         # Flush artifacts BEFORE EndFrame propagates — the audio buffer
         # processor is closed after EndFrame.
         artifacts = None
@@ -497,6 +517,21 @@ class PipecatMCPAgent:
         self._started = False
         logger.info("Pipecat MCP Agent stopped")
         return artifacts
+
+    async def _settle_event_log(self, max_wait: float = 2.0) -> None:
+        """Wait until the event log stops growing (bounded).
+
+        A drained STT queue means Whisper finished, not that the transcript
+        events landed: the frames still hop STT → aggregator → handler, each
+        on its own task. Polls until one quiet interval or ``max_wait``.
+        """
+        deadline = asyncio.get_event_loop().time() + max_wait
+        count = len(self._events)
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.25)
+            if len(self._events) == count:
+                return
+            count = len(self._events)
 
     async def _dump_artifacts(self, record_dir: str) -> dict:
         """Write the per-session artifacts into ``record_dir``.
