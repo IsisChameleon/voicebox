@@ -387,3 +387,30 @@ parent's pipecat-free property); "fixing" the tester-reported slow barge-in arm 
 its own timestamps, the arm landed ~1.5 s after the MCP call and the missed utterance was the
 tester's own turnaround (it armed after Ember had already started speaking). Not a defect
 until the new debug log says otherwise.
+
+---
+
+## D16 — Kokoro warms up at agent start; the lag floor is attributed and left to the issue
+
+*2026-08-03. Round-5 blind verification, branch `fix/audio-path-and-reporting`.*
+
+**Context:** round 5 passed the F1 prompt-stop test (stop blocked 32 s, drained, final
+transcript present) but found the session's **first** `speak()` split by a 5.33 s mid-utterance
+silence — the app took the turn and got talked over. pipecat's TTS layer synthesizes per
+sentence, so Task G's per-call buffering cannot bridge a gap *between* sentences; the gap was
+the first ONNX inference's one-time cost. Later utterances in rounds 4–5 (13 speaks) were all
+single-span.
+
+**Decided:** a fire-and-forget throwaway synthesis (`KokoroTTSService.warm_up`) at agent
+start, concurrent with the browser child's startup. Also: `agent-debug.log` is now listed in
+`stop()`'s artifacts dict (round 5 flagged the omission).
+
+**Also recorded:** the debug log attributed the ~25 s transcript-lag floor entirely to
+`model.transcribe` — `run_stt` 22–28 s regardless of segment length (6.3 s audio → 27.6 s;
+93 s → 106.8 s), analyzer 0.3–0.4 s, handler ~0. C3 is closed with live numbers; the
+optimization avenues (temperature-ladder capping, `beam_size=1`, smaller model) are on
+issue #13, deliberately outside this branch (the spec pins the CPU config).
+
+**Rejected:** buffering across sentence boundaries in the TTS aggregation layer — it would
+re-implement pipecat's sentence segmentation to fix a cost that only ever bites once per
+process, and rounds 4–5 show warm synthesis keeps up with playout.
