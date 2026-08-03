@@ -145,6 +145,21 @@ class KokoroTTSService(TTSService):
         """Indicate that this service supports TTFB and usage metrics."""
         return True
 
+    async def warm_up(self):
+        """Run one throwaway synthesis so the first real one isn't cold.
+
+        The session's first ONNX inference carries ~5 s of one-time cost.
+        Verification round 5 saw it land between two sentences of the first
+        ``speak()``: sentence one played, the mic went silent for 5.3 s while
+        sentence two warmed the model, and the app under test took the turn
+        mid-utterance. Discarding one tiny synthesis at startup moves that
+        cost off the conversation.
+        """
+        stream = self._kokoro.create_stream("Ready.", voice=self._voice_id, lang=self._lang_code)
+        async for _samples, _sample_rate in stream:
+            pass
+        logger.debug(f"{self}: warm-up synthesis complete")
+
     @traced_tts
     async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
         """Synthesize speech from text using kokoro-onnx.

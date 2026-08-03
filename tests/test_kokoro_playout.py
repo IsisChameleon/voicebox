@@ -90,6 +90,19 @@ async def test_tts_frames_still_bracket_and_error_path_closes():
     assert any(type(f).__name__ == "ErrorFrame" for f in frames)
 
 
+async def test_warm_up_consumes_one_synthesis():
+    # Round 5: the session's FIRST synthesis carried ~5 s of one-time ONNX
+    # cost, landing mid-utterance and splitting the first speak() into two
+    # turns. warm_up() must actually pull the stream (the inference runs
+    # during iteration), not just create it.
+    produced: list[float] = []
+    service = _kokoro_with_stubbed_synthesis(chunks=2, gap_secs=0.01, record=produced)
+
+    await service.warm_up()
+
+    assert len(produced) == 2  # the stream was consumed, so the model ran
+
+
 async def test_playout_resolves_on_bot_stopped_after_tts_stopped():
     # G2: the call returns when the audio actually finished — not at a segment
     # boundary, not on a silence timer.

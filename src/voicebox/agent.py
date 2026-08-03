@@ -402,6 +402,13 @@ class PipecatMCPAgent:
         tts = self._create_tts_service()
         vad = self._create_vad_processor()
 
+        # Fire-and-forget: warms Kokoro's ONNX session so the session's first
+        # speak() isn't split by ~5 s of one-time inference cost (round 5).
+        # Runs concurrently with the browser child's own startup; a speak()
+        # arriving first just queues behind it on the executor, no worse than
+        # the cold path it replaces.
+        asyncio.create_task(tts.warm_up())
+
         context = LLMContext()
         user_aggregator, assistant_aggregator = self._create_context_aggregators(context)
 
@@ -614,6 +621,10 @@ class PipecatMCPAgent:
             artifacts["app_bot_wav"] = write_wav("ember_voice.wav", app_bot_audio, 1)
             artifacts["tester_wav"] = write_wav("kokoro_voice.wav", tester_audio, 1)
             artifacts["merged_wav"] = write_wav("merged.wav", merged, 2)
+
+        debug_log = os.path.join(record_dir, "agent-debug.log")
+        if os.path.exists(debug_log):
+            artifacts["debug_log"] = os.path.abspath(debug_log)
 
         logger.info(f"wrote artifacts to {self._record_dir}: {sorted(artifacts)}")
         return artifacts
@@ -832,7 +843,7 @@ class PipecatMCPAgent:
             compute_type="int8",
         )
 
-    def _create_tts_service(self) -> TTSService:
+    def _create_tts_service(self) -> KokoroTTSService:
         return KokoroTTSService(voice_id="af_heart")
 
     def _create_vad_processor(self) -> VADProcessor:
