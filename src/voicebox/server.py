@@ -170,6 +170,12 @@ async def start_browser_session(
                 latency, talk-over windows, dead-air gaps, talk ratio,
                 transcripts; see ``stop()`` for the schema).
               * ``agent-debug.log`` — the session's DEBUG log (timing lines).
+              * ``shim.log`` — the in-page audio shim's tagged console lines
+                (install notes, WS drops, tap errors), timestamped as they
+                happen; survives page navigations.
+              * ``shim_diag.json`` — the final ``window.__voiceShim``
+                diagnostics snapshot (hook flags, chunk counters, per-track
+                bytes, errors).
 
     Returns:
         ``{cdp_endpoint, audio_ws_url, attach_hint}``. Raises if the page did
@@ -191,6 +197,7 @@ async def start_browser_session(
             cdp_port=cdp_port,
             headless=headless,
             user_data_dir=user_data_dir,
+            record_dir=record_dir,
         )
     except Exception:
         stop_pipecat_process()
@@ -378,9 +385,13 @@ async def stop() -> dict:
             audio was captured.
           * ``debug_log`` — ``agent-debug.log``, the per-session DEBUG sink
             (``voicebox.timing`` lines live here).
+          * ``shim_log`` / ``shim_diag`` — the in-page shim's console log and
+            final ``window.__voiceShim`` snapshot: how a broken audio tap is
+            told apart from an app bot that never spoke.
 
     """
     artifacts = None
+    shim_artifacts = None
     try:
         response = await send_command("stop", deadline=STOP_DEADLINE_SECS)
         artifacts = response.get("artifacts")
@@ -389,15 +400,17 @@ async def stop() -> dict:
         logger.warning(f"graceful stop failed ({e}); forcing child shutdown")
     finally:
         # Reap the child process and release the IPC queues, then tear down
-        # the browser — best-effort, never block one on the other.
+        # the browser — best-effort, never block one on the other. The shim
+        # artifacts ride on the browser teardown, so they survive a wedged
+        # pipecat child.
         await asyncio.to_thread(stop_pipecat_process)
         try:
-            await asyncio.to_thread(stop_browser)
+            shim_artifacts = await asyncio.to_thread(stop_browser)
         except Exception as e:
             logger.warning(f"stop_browser failed: {e}")
     result: dict = {"stopped": True}
-    if artifacts:
-        result["artifacts"] = artifacts
+    if artifacts or shim_artifacts:
+        result["artifacts"] = {**(artifacts or {}), **(shim_artifacts or {})}
     return result
 
 

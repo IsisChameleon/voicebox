@@ -18,6 +18,8 @@ takes a snapshot and performs no navigation, so it leaves the shim tab intact.
 """
 
 import multiprocessing
+import os
+import time
 from pathlib import Path
 from queue import Empty
 from typing import Optional
@@ -33,6 +35,7 @@ SHIM_READY_TIMEOUT_SECS = 10.0
 _browser_process: Optional[multiprocessing.Process] = None
 _startup_queue: Optional[multiprocessing.Queue] = None
 _stop_event: Optional[multiprocessing.Event] = None
+_record_dir: Optional[str] = None
 
 
 def start_browser(
@@ -42,6 +45,7 @@ def start_browser(
     headless: bool = False,
     user_data_dir: Optional[str] = None,
     startup_timeout: float = 60.0,
+    record_dir: Optional[str] = None,
 ) -> dict:
     """Launch Chromium with the shim pre-injected. Blocks until the page is loaded.
 
@@ -49,6 +53,12 @@ def start_browser(
     have to log in every run; the profile lives in the browser's default
     context, which is CDP-coherent (an attached client both drives and shares
     its cookies).
+
+    ``record_dir`` makes the shim's diagnostics reviewable after the fact:
+    every ``[voice-shim]``-tagged console line is appended to
+    ``<record_dir>/shim.log`` as it happens, and teardown snapshots
+    ``window.__voiceShim`` to ``<record_dir>/shim_diag.json``.
+    ``stop_browser()`` returns their paths.
 
     Returns a dict with ``cdp_endpoint`` (HTTP URL for ``connect_over_cdp``)
     and ``audio_ws_url``.
@@ -59,10 +69,11 @@ def start_browser(
             ``about:blank`` is never reported as a started session.
 
     """
-    global _browser_process, _startup_queue, _stop_event
+    global _browser_process, _startup_queue, _stop_event, _record_dir
 
     stop_browser()
 
+    _record_dir = record_dir
     _startup_queue = multiprocessing.Queue()
     _stop_event = multiprocessing.Event()
     _browser_process = multiprocessing.Process(
@@ -73,6 +84,7 @@ def start_browser(
             cdp_port,
             headless,
             user_data_dir,
+            record_dir,
             _startup_queue,
             _stop_event,
         ),
@@ -98,9 +110,16 @@ def start_browser(
     }
 
 
-def stop_browser():
-    """Tear down the Playwright-controlled Chromium, if running."""
-    global _browser_process, _startup_queue, _stop_event
+def stop_browser() -> Optional[dict]:
+    """Tear down the Playwright-controlled Chromium, if running.
+
+    Returns:
+        When the session ran with ``record_dir``, the paths of the shim
+        artifacts the child actually wrote (``{"shim_log", "shim_diag"}``,
+        either key may be absent); otherwise ``None``.
+
+    """
+    global _browser_process, _startup_queue, _stop_event, _record_dir
 
     if _stop_event is not None:
         _stop_event.set()
@@ -123,6 +142,16 @@ def stop_browser():
         _startup_queue = None
     _stop_event = None
 
+    record_dir, _record_dir = _record_dir, None
+    if record_dir is None:
+        return None
+    artifacts = {}
+    for key, name in (("shim_log", "shim.log"), ("shim_diag", "shim_diag.json")):
+        path = os.path.abspath(os.path.join(record_dir, name))
+        if os.path.exists(path):
+            artifacts[key] = path
+    return artifacts or None
+
 
 def _run_browser(
     url: str,
@@ -130,6 +159,7 @@ def _run_browser(
     cdp_port: int,
     headless: bool,
     user_data_dir: Optional[str],
+    record_dir: Optional[str],
     startup_queue,
     stop_event,
 ):
@@ -143,10 +173,53 @@ def _run_browser(
             cdp_port,
             headless,
             user_data_dir,
+            record_dir,
             startup_queue,
             stop_event,
         )
     )
+
+
+def _capture_shim_console(page, log_path: str):
+    """Append every ``[voice-shim]``-tagged console line on ``page`` to ``log_path``.
+
+    The console stream is the shim's durable diagnostics channel: every
+    ``recordError`` goes through ``console.warn('[voice-shim]', ...)`` and
+    the stream survives navigations, whereas ``window.__voiceShim`` is
+    re-created per document (the init script re-runs), so a teardown snapshot
+    alone would lose anything that happened before the last navigation.
+    """
+
+    def on_console(msg):
+        try:
+            if not msg.text.startswith("[voice-shim]"):
+                return
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"{time.time():.3f} [{msg.type}] {msg.text}\n")
+        except Exception as e:
+            logger.debug(f"shim console capture failed: {e}")
+
+    page.on("console", on_console)
+
+
+async def _dump_shim_diag(page, record_dir: str):
+    """Snapshot ``window.__voiceShim`` to ``<record_dir>/shim_diag.json``.
+
+    An unreachable page (crashed, closed) yields ``{"snapshot_error": ...}``
+    rather than a missing file — the artifact's absence should only ever mean
+    "no record_dir was configured".
+    """
+    import json
+
+    try:
+        diag = await page.evaluate("() => JSON.parse(JSON.stringify(window.__voiceShim))")
+    except Exception as e:
+        diag = {"snapshot_error": str(e)}
+    try:
+        with open(os.path.join(record_dir, "shim_diag.json"), "w", encoding="utf-8") as f:
+            json.dump(diag, f, indent=2)
+    except Exception as e:
+        logger.warning(f"shim diag dump failed: {e}")
 
 
 async def _wait_for_shim(page, timeout: float):
@@ -186,12 +259,16 @@ async def _run_browser_async(
     cdp_port: int,
     headless: bool,
     user_data_dir: Optional[str],
+    record_dir: Optional[str],
     startup_queue,
     stop_event,
 ):
     import asyncio
 
     from playwright.async_api import async_playwright
+
+    if record_dir:
+        os.makedirs(record_dir, exist_ok=True)
 
     shim_src = SHIM_PATH.read_text(encoding="utf-8")
     init_script = f"window.__VOICE_SHIM_WS_URL__ = {audio_ws_url!r};\n{shim_src}"
@@ -225,6 +302,8 @@ async def _run_browser_async(
         # by an attached CDP client must not connect to the audio WS — if they
         # did, pipecat would kick the active connection and start a 1 Hz storm.
         await page.add_init_script(init_script)
+        if record_dir:
+            _capture_shim_console(page, os.path.join(record_dir, "shim.log"))
 
         try:
             try:
@@ -247,6 +326,8 @@ async def _run_browser_async(
                     logger.warning("Browser disconnected")
                     break
         finally:
+            if record_dir:
+                await _dump_shim_diag(page, record_dir)
             try:
                 await context.close()
             except Exception:

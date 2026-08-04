@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import pytest
 
 from voicebox import browser_session
@@ -81,6 +84,45 @@ class _FakeProcess:
 
     def kill(self):
         pass
+
+
+def test_shim_artifacts_written(tmp_path):
+    # D22. Live headless Chromium on a data: URL — no app, no audio server.
+    # The shim installs (hook 1 skipped: data: origins have no mediaDevices),
+    # its tagged console lines must land in shim.log, and teardown must
+    # snapshot window.__voiceShim to shim_diag.json; stop_browser() returns
+    # the paths so server.stop() can merge them into the artifacts dict.
+    browser_session.start_browser(
+        url="data:text/html,<title>shim-host</title>",
+        audio_ws_url="ws://localhost:9391",
+        cdp_port=9335,
+        headless=True,
+        record_dir=str(tmp_path),
+    )
+
+    artifacts = browser_session.stop_browser()
+
+    assert artifacts is not None
+    log_text = Path(artifacts["shim_log"]).read_text()
+    assert "[voice-shim]" in log_text
+    assert "installed." in log_text
+    diag = json.loads(Path(artifacts["shim_diag"]).read_text())
+    assert diag["installed"] is True
+    assert diag["micHookInstalled"] is False
+
+
+def test_stop_browser_returns_none_without_record_dir(monkeypatch):
+    # D22. No record_dir → no shim artifacts and no paths invented.
+    monkeypatch.setattr(browser_session.multiprocessing, "Process", _FakeProcess)
+
+    browser_session.start_browser(
+        url="http://localhost:3000",
+        audio_ws_url="ws://localhost:9091",
+        cdp_port=9222,
+        headless=True,
+    )
+
+    assert browser_session.stop_browser() is None
 
 
 def test_attach_hint_does_not_navigate(monkeypatch):
