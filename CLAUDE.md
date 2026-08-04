@@ -83,7 +83,9 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
   and `bot_speech_stopped.t` lands ~`vad_stop_secs` (1.0 s) late by construction.
 - **`record_dir` exists** (`runner_args.py`, `agent.py` `_dump_artifacts`): set it and `stop()` writes
   user/bot/merged WAVs via `AudioBufferProcessor`. Snapshot buffers BEFORE `stop_recording()` — it
-  resets them.
+  resets them. The BROWSER child adds `shim.log` (every `[voice-shim]` console line, live) and
+  `shim_diag.json` (`window.__voiceShim` snapshot at teardown) — D22; console capture is the durable
+  channel, `__voiceShim` resets per navigation.
 - **Ending a `PipelineWorker` means `stop_when_done()`, not `stop()`.** `BaseWorker.stop()` cancels
   job groups and sets the finished event but never ends the pipeline run, so `WorkerRunner.run()`
   never returns — a test that awaits it hangs forever. `stop_when_done()` queues the `EndFrame`,

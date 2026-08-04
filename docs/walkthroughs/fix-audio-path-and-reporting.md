@@ -1,7 +1,8 @@
 # Walkthrough — `fix/audio-path-and-reporting`
 
 *Status: **complete**. Started 2026-07-29, walkthrough opened 2026-08-01 (see `BUILDLOG.md` D1),
-all tasks landed 2026-08-04. Branched from `eb89647`.*
+all tasks landed 2026-08-04. Task I (shim diagnostics artifacts, D22) added post-review the same
+day. Branched from `eb89647`.*
 
 Fixes the audio-path and reporting defects found in a dogfood session. Root causes:
 [`docs/specs/2026-07-29-field-report-triage.md`](../specs/2026-07-29-field-report-triage.md).
@@ -21,6 +22,7 @@ Task breakdown and success criteria:
 | **F** | Transcript-loss holes closed (drain STT before writing artefacts) | `5d67578` | [t-f-transcript-loss-holes.md](../artefacts/fix-audio-path-and-reporting/t-f-transcript-loss-holes.md) | ✅ |
 | **G** | Kokoro plays one utterance as one turn (no mid-utterance silence) | `57d9527` | [t-g-kokoro-single-turn.md](../artefacts/fix-audio-path-and-reporting/t-g-kokoro-single-turn.md) | ✅ |
 | **H** | `listen()` batches time-ordered; docstrings state what timestamps mean | `61aa484` | [t-h-listen-ordering-docstrings.md](../artefacts/fix-audio-path-and-reporting/t-h-listen-ordering-docstrings.md) | ✅ |
+| **I** | Shim diagnostics become artifacts: `shim.log` + `shim_diag.json` in `record_dir` | `1551a90` | [t-i-shim-diagnostics-artifacts.md](../artefacts/fix-audio-path-and-reporting/t-i-shim-diagnostics-artifacts.md) | ✅ |
 
 Live-only (🔴) acceptance stories across all tasks need a running voice app on
 `localhost:3000` and are collected in the execution spec; they are the checklist for the next
@@ -275,3 +277,30 @@ Full list in the evidence artefact.
 **Not covered:** sort exercised on synthetic logs only (post-D/E skew is ms-scale by design);
 new `server.py` docstrings reach clients only after the pending server restart; the new key is
 not yet observed live — all on round 7's checklist. Full list in the evidence artefact.
+
+---
+
+## Task I — shim diagnostics become artifacts (post-review, D22)
+
+*Commit `1551a90`. Decision: `BUILDLOG.md` D22. Delta:
+`docs/architecture/deltas/shim-diagnostics-artifacts.md`.*
+
+- Origin: the 4+1 describe pass (`docs/architecture/4plus1.md`) flagged that shim runtime
+  errors lived only in `window.__voiceShim` — a broken audio tap was indistinguishable from
+  an app bot that never spoke, unless a CDP client went looking.
+- The browser child now subscribes `page.on("console")` and appends every
+  `[voice-shim]`-tagged line (every `recordError` is one) to `record_dir/shim.log`
+  (`src/voicebox/browser_session.py:183-202`), and snapshots `window.__voiceShim` to
+  `record_dir/shim_diag.json` at teardown, before `context.close()`
+  (`src/voicebox/browser_session.py:205-224`, `:328-331`).
+- `start_browser` gains `record_dir`; `stop_browser()` returns the paths of whichever files
+  exist, and `server.stop()` merges them into `artifacts` in the `finally` — so they survive
+  a wedged pipecat child (`src/voicebox/server.py:401-414`).
+- Console capture (not `__voiceShim` polling) is the durable channel: the diag object is
+  re-created on every navigation; the console stream isn't. Recorded as invariant I15 in the
+  core 4+1 doc.
+
+**Try it:** `uv run pytest tests/test_browser_session.py tests/test_server_stop_artifacts.py -q`
+
+**Not covered:** a real WebRTC session's tap lines and the `snapshot_error` path — see the
+artefact's "Not covered" section.

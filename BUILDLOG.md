@@ -563,3 +563,35 @@ test (its old floor was 60 s — *below* the cap it must outlive).
 **Rejected:** importing the agent constants into `server.py` to kill the mirror — breaks the
 parent's pipecat-free hot-reload contract (D15's precedent); the test process may import both
 sides freely, which is exactly where the equality belongs.
+
+---
+
+## D22 — Shim diagnostics become artifacts: `shim.log` (console capture) + `shim_diag.json` (teardown snapshot)
+
+*2026-08-04. Post-review addition, branch `fix/audio-path-and-reporting`.*
+
+**Context:** the 4+1 describe pass surfaced the one undocumented, non-deliberate gap: shim
+runtime errors accumulate in `window.__voiceShim.errors` and are visible only to a
+CDP-attached client — to the LLM (and to the artifact reviewer) a broken tap is
+indistinguishable from the app bot never speaking. Everything else in the report set
+(`events.json`, `metrics.json`, WAVs, `agent-debug.log`) already lands in `record_dir`;
+the browser-side half of the system was the only mute participant.
+
+**Decided:** capture in the browser child, not the pipecat child. Every shim console line is
+already tagged (`recordError` goes through `console.warn('[voice-shim]', ...)`), so the child
+subscribes `page.on("console")`, filters on the tag, and appends timestamped lines to
+`record_dir/shim.log`; at teardown (before `context.close()`) it snapshots
+`window.__voiceShim` to `record_dir/shim_diag.json`. `start_browser` gains `record_dir`;
+`stop_browser()` returns the paths of whichever files exist and `server.stop()` merges them
+into the artifacts dict — including when the pipecat child's graceful stop failed, since the
+browser teardown sits in the `finally`. Console capture is the primary channel because
+`window.__voiceShim` is re-created on every navigation (init script runs per document), so a
+teardown-only snapshot loses pre-navigation errors; the snapshot adds the counters
+(`inboundChunks`, `perTrackBytes`, …) that the log lines don't carry.
+
+**Rejected:** shipping errors over the audio WebSocket (the wire is raw PCM by design — an
+envelope would touch the serializer, the transport config, and the shim for a diagnostics
+side-channel); polling `window.__voiceShim` from the park loop (misses errors between polls
+AND across navigations, strictly worse than the console stream); writing into
+`agent-debug.log` (that file is the *pipecat* child's loguru sink — cross-process appends
+from the browser child would interleave).
