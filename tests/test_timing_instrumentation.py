@@ -117,7 +117,7 @@ async def _run_one_stt_segment(stt: SegmentedSTTService):
 
     # stop_when_done() queues an EndFrame, which is what actually ends the
     # pipeline and lets runner.run() return — the same teardown agent.py uses
-    # (agent.py:449). BaseWorker.stop() only sets the finished event; the
+    # (agent.py stop()). BaseWorker.stop() only sets the finished event; the
     # runner task would run forever and the test would hang.
     await worker.stop_when_done()
     await run_task

@@ -41,6 +41,15 @@ are diagnosed, fixed and committed before the next.
 | **6** (multi-sentence stress) | `248446c` (D17: TOKEN aggregation — one speak() = one synthesis) | [r6-blind-verification.md](../artefacts/fix-audio-path-and-reporting/r6-blind-verification.md) | ✅ |
 | **7** (post-H: D16/D17/D18 live, H paging) | `3d965a7` (D19: playout window scales with text length) | [r7-blind-verification.md](../artefacts/fix-audio-path-and-reporting/r7-blind-verification.md) | ✅ |
 
+## Pre-PR review pass
+
+Three independent reviewer lenses over the full branch diff (consumer seams
+`server.py` ↔ `agent.py` ↔ processors, core logic, tests/docs coherence). Fixes in
+`166ae5e` (D20: `_Playout` skips prior utterances' TTS stops; D21: composed speak
+deadlines + the cross-process invariants pinned by `tests/test_server_deadlines.py`),
+docstring/docs drift corrected. Findings disposition:
+[review-pass.md](../artefacts/fix-audio-path-and-reporting/review-pass.md).
+
 Round 1 confirmed A3/A4 and D3 live, confirmed the specced F and G holes, answered **C3**
 (the ~24 s lag is Whisper's lazy decode freezing the event loop — not smart-turn inference,
 so the conditional follow-up stays off), and surfaced the 5 s turn-stop watchdog corrupting

@@ -41,9 +41,13 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
 | `src/voicebox/agent_ipc.py` | The parent↔pipecat-child mailbox: `multiprocessing.Queue` + child lifecycle. Uses `spawn` (not fork). Full-duplex: requests carry a correlation `id`; a response-router task resolves per-id futures, so commands overlap and responses may arrive out of order. |
 | `src/voicebox/bot.py` | The pipecat child's command loop: reads requests and spawns one task per command (`listen`/`speak`); `stop` cancels in-flight tasks and exits. |
 | `src/voicebox/agent.py` | `PipecatMCPAgent` — owns the Pipecat pipeline behind `WebsocketServerTransport`. STT/TTS/VAD/turn config lives here. |
+| `src/voicebox/events.py` | The conversation-event vocabulary `listen()` returns (pydantic models, party naming). |
+| `src/voicebox/metrics.py` | `compute_metrics(events)` → the `metrics.json` report: turns, latencies, gaps, outage quarantine, bias notes. |
+| `src/voicebox/timing.py` | `log_duration` + mixins timing STT / turn-analyzer calls at DEBUG (`voicebox.timing` lines). |
 | `src/voicebox/runner_args.py` | `BrowserShimRunnerArguments` dataclass (host, port, mic_rate, tap_rate, record_dir). Pipecat ships none for plain WS-server transports. |
 | `src/voicebox/raw_pcm_serializer.py` | Tiny `FrameSerializer`: raw 16-bit LE mono PCM, no protobuf/envelope. |
-| `src/voicebox/processors/kokoro_tts.py` | Kokoro TTS service (`voice_id="af_heart"`). |
+| `src/voicebox/processors/kokoro_tts.py` | Kokoro TTS service (`voice_id="af_heart"`, TOKEN aggregation, `warm_up`). |
+| `src/voicebox/processors/nonblocking_whisper_stt.py` | `NonBlockingSegmentedSTT` — Whisper off the frame task (one worker, ordered), eager decode, drain + `transcription_lag_secs`. |
 | `src/voicebox/shim.js` | The browser shim, injected via `addInitScript` before page code. Overrides `getUserMedia` (Hook 1) and wraps `RTCPeerConnection` (Hook 2). Diagnostics on `window.__voiceShim`. |
 | `src/voicebox/browser_session.py` | Manages the Playwright child process. Supports `user_data_dir` (persistent default context, CDP-coherent — exposed via `start_browser_session` for session reuse). See the CDP context-split trap below for why `storage_state` is intentionally not offered. |
 | `scripts/smoke_browser_shim.py` | Audio-path smoke test (no readme app needed). The reference for `connect_over_cdp` + reading `__voiceShim`. |
@@ -51,8 +55,8 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
 ## MCP tools (`server.py`)
 
 - `start_browser_session(url, headless=False, cdp_port=9222, audio_port=9091)` → `{cdp_endpoint, audio_ws_url}`
-- `speak(text, wait_for_playout=False, wait_for_turn=False, when=None, timer_secs=0.0)` → `{queued: true}` when queued. `wait_for_playout=True` returns only after OUR OWN audio finishes playing, adding `{started_at, finished_at, interrupted}` (it waits for our Kokoro audio — NOT the app bot). `wait_for_turn=True` waits until the app bot is silent, then speaks (the polite path). `when=<event>, timer_secs=N` arms a one-shot barge-in: returns `{armed: true}` immediately, then N s after the next `when` event (e.g. `"app_bot_speech_started"`) speaks over the bot. `wait_for_turn`/`when` gate WHEN we start; `wait_for_playout` gates WHEN the call returns.
-- `listen(timeout=30, cursor=0)` → `{events: [...], cursor}` — timestamped conversation events (`session_started`, `session_stopped`, `client_connected/disconnected`, `app_bot_speech_started/stopped`, `app_bot_transcript`, `tester_speech_started/stopped/interrupted`, `tester_transcript`, `tester_barge_in_armed/fired`); pass the returned cursor back to resume; empty `events` on timeout. Two parties: **app_bot** = the app's voice agent under test, **tester** = our synthetic user. Event vocabulary lives in `events.py`.
+- `speak(text, wait_for_playout=False, wait_for_turn=False, when=None, timer_secs=0.0)` → `{queued: true}` when queued. `wait_for_playout=True` returns only after OUR OWN audio finishes playing, adding `{played: true, started_at, finished_at, interrupted}` — or `{played: false, reason}` if the scaled observation window (30 s + 0.8 s/word) expires unobserved (it waits for our Kokoro audio — NOT the app bot). `wait_for_turn=True` waits until the app bot is silent, then speaks (the polite path); adds `waited_for_turn_secs`. `when=<event>, timer_secs=N` arms a one-shot barge-in: returns `{armed: true}` immediately, then N s after the next `when` event (e.g. `"app_bot_speech_started"`) speaks over the bot. `wait_for_turn`/`when` gate WHEN we start (mutually exclusive with each other); `wait_for_playout` gates WHEN the call returns.
+- `listen(timeout=30, cursor=0)` → `{events: [...], cursor, transcription_lag_secs}` — timestamped conversation events (`session_started`, `session_stopped`, `client_connected/disconnected`, `app_bot_speech_started/stopped`, `app_bot_transcript`, `tester_speech_started/stopped/interrupted`, `tester_transcript`, `tester_barge_in_armed/fired`); each batch sorted by `t`, cursor tracks append order; pass the returned cursor back to resume; empty `events` on timeout. Two parties: **app_bot** = the app's voice agent under test, **tester** = our synthetic user. Event vocabulary lives in `events.py`.
 - `stop()` → tears down pipecat child + browser child
 
 ## Non-obvious facts & traps (verified, don't re-derive)
@@ -60,30 +64,30 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
 - **Asymmetric sample rates are intentional.** Browser→pipecat tap = **16 kHz** because
   `mlx_whisper.transcribe()` has no `sample_rate` param and hard-assumes 16 kHz; the shim's outbound
   `AudioContext` does the 48→16 resample. pipecat→browser mic = **48 kHz** to match the page's native
-  AudioContext. See `runner_args.py` docstring, `agent.py:280-291`, `shim.js:31-37`.
-- **VAD `stop_secs=1.0s`** (`agent.py:101`), not pipecat's default 0.2s — 0.2s chops remote WebRTC
+  AudioContext. See `runner_args.py` docstring, `agent.py` `create_agent` (transport params), `shim.js:31-37`.
+- **VAD `stop_secs=1.0s`** (`VAD_STOP_SECS`, `agent.py:99`), not pipecat's default 0.2s — 0.2s chops remote WebRTC
   speech mid-sentence into single-word transcripts. Consequence: utterance "end" wall-clock lands
   ~1 s after speech truly stops.
-- **The shim taps via Web Audio, NOT WebCodecs `MediaStreamTrackProcessor`** (`shim.js:156-304`).
+- **The shim taps via Web Audio, NOT WebCodecs `MediaStreamTrackProcessor`** (`shim.js:177-341`).
   `MediaStreamTrackProcessor` drops silence on a remote track → sparse stream → WAV plays ~3× fast.
   Web Audio is pulled at a fixed rate and fills silence with zeros, preserving real-time pacing.
-- **`RTCPeerConnection` track events are deduped by `track.id`** (`shim.js:181-246`) — Daily opens
+- **`RTCPeerConnection` track events are deduped by `track.id`** (`shim.js:199-268`) — Daily opens
   multiple peer connections and the same logical audio surfaces more than once (commits `26bd9c5`,
   `2b3d7f1`).
-- **`enable_rtvi=False`** (`agent.py:133-137`) — we're a headless synthetic user; transcripts reach
+- **`enable_rtvi=False`** (`agent.py:481-487`) — we're a headless synthetic user; transcripts reach
   Claude via `listen()`'s return value, not RTVI data-channel notifications.
 - **Timestamps surface via the event log** (Stage 2): a pipeline observer in `agent.py` turns
   `VADUserStarted/StoppedSpeakingFrame` (wall-clock `timestamp`), `BotStarted/StoppedSpeakingFrame`
   (our playout span) and `UserTurnStoppedMessage` into `listen()` events. Still true: STT is
   batch+VAD-segmented, so *per-word* receive timestamps are NOT obtainable — utterance-level only,
   and `bot_speech_stopped.t` lands ~`vad_stop_secs` (1.0 s) late by construction.
-- **`record_dir` exists** (`runner_args.py`, `agent.py:105-128,194-231`): set it and `stop()` writes
+- **`record_dir` exists** (`runner_args.py`, `agent.py` `_dump_artifacts`): set it and `stop()` writes
   user/bot/merged WAVs via `AudioBufferProcessor`. Snapshot buffers BEFORE `stop_recording()` — it
   resets them.
 - **Ending a `PipelineWorker` means `stop_when_done()`, not `stop()`.** `BaseWorker.stop()` cancels
   job groups and sets the finished event but never ends the pipeline run, so `WorkerRunner.run()`
   never returns — a test that awaits it hangs forever. `stop_when_done()` queues the `EndFrame`,
-  which is what `agent.py:449` does in production.
+  which is what `agent.py`'s `stop()` does in production (`queue_frame(EndFrame())`).
 - **`spawn`, not fork** (`agent_ipc.py:24`) — forking from the async MCP context copies the event
   loop / fds / locks and breaks.
 - **Shim is defensive**: every hook is gated on the API existing; on insecure origins (non-localhost
