@@ -595,3 +595,35 @@ side-channel); polling `window.__voiceShim` from the park loop (misses errors be
 AND across navigations, strictly worse than the console stream); writing into
 `agent-debug.log` (that file is the *pipecat* child's loguru sink — cross-process appends
 from the browser child would interleave).
+
+---
+
+## D23 — Browser-child startup handshake: exactly one message, covering every pre-readiness failure
+
+*2026-08-04. Branch `fix/audio-path-and-reporting`.*
+
+**Context:** `_run_browser_async` only reported failures from `page.goto` /
+`_wait_for_shim` onward. A failure earlier in the child — Playwright driver
+startup, `chromium.launch()` (e.g. `playwright install` never run), context or
+page creation — raised out of the coroutine without touching `startup_queue`,
+so the parent blocked for the full `startup_timeout` (60 s) and raised the
+misleading "failed to become ready within 60.0s" instead of the child's actual
+error.
+
+**Decided:** the startup handshake is single-shot and total: every child exit
+path *before* readiness puts exactly one `{"ok": False, "error": ...}` on
+`startup_queue`; after the `{"ok": True}` handshake a `started` flag suppresses
+any further queue writes (a post-startup failure is logged, never queued — a
+stray message would be misread by a future reader of the queue). Resource
+teardown is guarded per-handle (`context` / `browser` / `page` may each be
+`None` when the failure preceded their creation), and the D22 invariant — shim
+diag snapshot before `context.close()` — now applies exactly when a page
+exists. Covered by `test_chromium_launch_failure_propagates`, which forces the
+launch failure inside the real spawned child via an empty
+`PLAYWRIGHT_BROWSERS_PATH` (env is inherited across `spawn`) and asserts the
+parent fails fast, not at the timeout.
+
+**Rejected:** parent-side `is_alive()` polling alongside the queue wait — it
+only helps when the child dies *without* running Python exception handling
+(SIGKILL/OOM), a case rare enough that the extra polling loop and its own race
+windows don't earn their cost; the queue write covers every exception path.

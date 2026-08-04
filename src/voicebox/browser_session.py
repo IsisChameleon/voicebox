@@ -265,76 +265,92 @@ async def _run_browser_async(
 ):
     import asyncio
 
-    from playwright.async_api import async_playwright
+    # Every exit path before this flips to True must put exactly one
+    # {"ok": False} on startup_queue — otherwise the parent can't tell a failed
+    # child from a slow one and blocks for the full startup timeout.
+    started = False
+    browser = None
+    context = None
+    page = None
+    try:
+        from playwright.async_api import async_playwright
 
-    if record_dir:
-        os.makedirs(record_dir, exist_ok=True)
-
-    shim_src = SHIM_PATH.read_text(encoding="utf-8")
-    init_script = f"window.__VOICE_SHIM_WS_URL__ = {audio_ws_url!r};\n{shim_src}"
-
-    chromium_args = [
-        f"--remote-debugging-port={cdp_port}",
-        "--use-fake-ui-for-media-stream",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-blink-features=AutomationControlled",
-    ]
-
-    async with async_playwright() as p:
-        if user_data_dir:
-            context = await p.chromium.launch_persistent_context(
-                user_data_dir=user_data_dir,
-                headless=headless,
-                args=chromium_args,
-                permissions=["microphone"],
-            )
-            browser = None
-        else:
-            browser = await p.chromium.launch(
-                headless=headless,
-                args=chromium_args,
-            )
-            context = await browser.new_context(permissions=["microphone"])
-
-        page = await context.new_page()
-        # Inject shim into this page only, not every future tab. New tabs opened
-        # by an attached CDP client must not connect to the audio WS — if they
-        # did, pipecat would kick the active connection and start a 1 Hz storm.
-        await page.add_init_script(init_script)
         if record_dir:
-            _capture_shim_console(page, os.path.join(record_dir, "shim.log"))
+            os.makedirs(record_dir, exist_ok=True)
 
-        try:
+        shim_src = SHIM_PATH.read_text(encoding="utf-8")
+        init_script = f"window.__VOICE_SHIM_WS_URL__ = {audio_ws_url!r};\n{shim_src}"
+
+        chromium_args = [
+            f"--remote-debugging-port={cdp_port}",
+            "--use-fake-ui-for-media-stream",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-blink-features=AutomationControlled",
+        ]
+
+        async with async_playwright() as p:
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-                await _wait_for_shim(page, timeout=SHIM_READY_TIMEOUT_SECS)
-            except Exception as e:
+                if user_data_dir:
+                    context = await p.chromium.launch_persistent_context(
+                        user_data_dir=user_data_dir,
+                        headless=headless,
+                        args=chromium_args,
+                        permissions=["microphone"],
+                    )
+                else:
+                    browser = await p.chromium.launch(
+                        headless=headless,
+                        args=chromium_args,
+                    )
+                    context = await browser.new_context(permissions=["microphone"])
+
+                page = await context.new_page()
+                # Inject shim into this page only, not every future tab. New tabs
+                # opened by an attached CDP client must not connect to the audio
+                # WS — if they did, pipecat would kick the active connection and
+                # start a 1 Hz storm.
+                await page.add_init_script(init_script)
+                if record_dir:
+                    _capture_shim_console(page, os.path.join(record_dir, "shim.log"))
+
                 # The parent must not be told a session started when the page
                 # never navigated — a blank tab wastes the caller's whole run.
-                logger.error(f"Browser startup failed for {url}: {e}")
-                startup_queue.put({"ok": False, "error": str(e)})
-                return
+                await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                await _wait_for_shim(page, timeout=SHIM_READY_TIMEOUT_SECS)
 
-            logger.info(f"Browser ready. CDP: http://localhost:{cdp_port} | audio: {audio_ws_url}")
-            startup_queue.put({"ok": True})
+                logger.info(
+                    f"Browser ready. CDP: http://localhost:{cdp_port} | audio: {audio_ws_url}"
+                )
+                started = True
+                startup_queue.put({"ok": True})
 
-            # Park here until parent asks us to stop or the browser dies.
-            while not stop_event.is_set():
-                await asyncio.sleep(0.5)
-                if browser is not None and not browser.is_connected():
-                    logger.warning("Browser disconnected")
-                    break
-        finally:
-            if record_dir:
-                await _dump_shim_diag(page, record_dir)
-            try:
-                await context.close()
-            except Exception:
-                pass
-            if browser is not None:
-                try:
-                    await browser.close()
-                except Exception:
-                    pass
-            logger.info("Browser child exiting")
+                # Park here until parent asks us to stop or the browser dies.
+                while not stop_event.is_set():
+                    await asyncio.sleep(0.5)
+                    if browser is not None and not browser.is_connected():
+                        logger.warning("Browser disconnected")
+                        break
+            finally:
+                if record_dir and page is not None:
+                    await _dump_shim_diag(page, record_dir)
+                if context is not None:
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
+                if browser is not None:
+                    try:
+                        await browser.close()
+                    except Exception:
+                        pass
+    except Exception as e:
+        if started:
+            # Startup already succeeded; the handshake is over. Reporting this
+            # would leave a stray message for a future queue reader.
+            logger.error(f"Browser child failed after startup: {e}")
+        else:
+            logger.error(f"Browser startup failed for {url}: {e}")
+            startup_queue.put({"ok": False, "error": str(e)})
+    finally:
+        logger.info("Browser child exiting")

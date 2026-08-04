@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -60,6 +61,49 @@ def test_navigation_failure_leaves_no_process(monkeypatch):
     assert len(children) == 1
     assert not children[0].is_alive()
     assert browser_session._browser_process is None
+    assert browser_session._stop_event is None
+
+
+def test_chromium_launch_failure_propagates(monkeypatch, tmp_path):
+    # A failure BEFORE the page exists (playwright driver up, but Chromium
+    # launch raises) must reach the parent as a startup error, promptly — not
+    # as a readiness timeout after the full startup_timeout. An empty
+    # PLAYWRIGHT_BROWSERS_PATH makes launch fail with "Executable doesn't
+    # exist" inside the spawned child (env is inherited); no browser runs.
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
+
+    children = []
+    real_process = browser_session.multiprocessing.Process
+
+    def recording_process(*args, **kwargs):
+        child = real_process(*args, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(browser_session.multiprocessing, "Process", recording_process)
+
+    started_at = time.monotonic()
+    with pytest.raises(RuntimeError) as excinfo:
+        browser_session.start_browser(
+            url="http://localhost:3000",
+            audio_ws_url="ws://localhost:9091",
+            cdp_port=9336,
+            headless=True,
+            startup_timeout=60.0,
+        )
+    elapsed = time.monotonic() - started_at
+
+    message = str(excinfo.value)
+    assert "startup failed" in message
+    # The child's launch error, not the parent's readiness-timeout fallback.
+    assert "failed to become ready" not in message
+    # The child reported instead of dying silently: no 60 s timeout wait.
+    assert elapsed < 30.0
+
+    assert len(children) == 1
+    assert not children[0].is_alive()
+    assert browser_session._browser_process is None
+    assert browser_session._startup_queue is None
     assert browser_session._stop_event is None
 
 
