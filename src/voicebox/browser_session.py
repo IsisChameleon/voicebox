@@ -26,6 +26,8 @@ from typing import Optional
 
 from loguru import logger
 
+from voicebox.artifacts import existing_artifact_path
+
 SHIM_PATH = Path(__file__).parent / "shim.js"
 
 # How long the child waits for the page to navigate and the shim to install
@@ -147,8 +149,8 @@ def stop_browser() -> Optional[dict]:
         return None
     artifacts = {}
     for key, name in (("shim_log", "shim.log"), ("shim_diag", "shim_diag.json")):
-        path = os.path.abspath(os.path.join(record_dir, name))
-        if os.path.exists(path):
+        path = existing_artifact_path(record_dir, name)
+        if path is not None:
             artifacts[key] = path
     return artifacts or None
 
@@ -188,18 +190,26 @@ def _capture_shim_console(page, log_path: str):
     the stream survives navigations, whereas ``window.__voiceShim`` is
     re-created per document (the init script re-runs), so a teardown snapshot
     alone would lose anything that happened before the last navigation.
+
+    The log file is opened once here and kept for the page's lifetime — two
+    ``recordError`` call sites (inbound WS message handling, outbound tap)
+    fire on every audio callback, so a per-line open/write/close would turn
+    a WS-drop or tap-error flood into tens of syscalls a second. Returns the
+    open file handle; the caller closes it at teardown.
     """
+    log_file = open(log_path, "a", encoding="utf-8")
 
     def on_console(msg):
         try:
             if not msg.text.startswith("[voice-shim]"):
                 return
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(f"{time.time():.3f} [{msg.type}] {msg.text}\n")
+            log_file.write(f"{time.time():.3f} [{msg.type}] {msg.text}\n")
+            log_file.flush()
         except Exception as e:
             logger.debug(f"shim console capture failed: {e}")
 
     page.on("console", on_console)
+    return log_file
 
 
 async def _dump_shim_diag(page, record_dir: str):
@@ -272,6 +282,7 @@ async def _run_browser_async(
     browser = None
     context = None
     page = None
+    shim_log_file = None
     try:
         from playwright.async_api import async_playwright
 
@@ -312,7 +323,9 @@ async def _run_browser_async(
                 # start a 1 Hz storm.
                 await page.add_init_script(init_script)
                 if record_dir:
-                    _capture_shim_console(page, os.path.join(record_dir, "shim.log"))
+                    shim_log_file = _capture_shim_console(
+                        page, os.path.join(record_dir, "shim.log")
+                    )
 
                 # The parent must not be told a session started when the page
                 # never navigated — a blank tab wastes the caller's whole run.
@@ -334,6 +347,8 @@ async def _run_browser_async(
             finally:
                 if record_dir and page is not None:
                     await _dump_shim_diag(page, record_dir)
+                if shim_log_file is not None:
+                    shim_log_file.close()
                 if context is not None:
                     try:
                         await context.close()

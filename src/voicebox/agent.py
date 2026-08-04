@@ -71,6 +71,7 @@ from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 
+from voicebox.artifacts import existing_artifact_path
 from voicebox.events import (
     EventType,
     SessionStartedEvent,
@@ -677,9 +678,9 @@ class PipecatMCPAgent:
             artifacts["tester_wav"] = write_wav("kokoro_voice.wav", tester_audio, 1)
             artifacts["merged_wav"] = write_wav("merged.wav", merged, 2)
 
-        debug_log = os.path.join(record_dir, "agent-debug.log")
-        if os.path.exists(debug_log):
-            artifacts["debug_log"] = os.path.abspath(debug_log)
+        debug_log = existing_artifact_path(record_dir, "agent-debug.log")
+        if debug_log is not None:
+            artifacts["debug_log"] = debug_log
 
         logger.info(f"wrote artifacts to {self._record_dir}: {sorted(artifacts)}")
         return artifacts
