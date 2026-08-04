@@ -473,3 +473,35 @@ IPC change (the dict passes through verbatim), pinned by
 exactly what the round-4/5/6 "is voicebox slow or am I?" confusions needed, and costs less
 to report than to explain away. Also rejected: a boolean `waited` — same cost, strictly
 less information.
+
+---
+
+## D19 — The playout observation window scales with text length (round 7)
+
+*2026-08-04. Round-7 blind verification, branch `fix/audio-path-and-reporting`.*
+
+**Context:** round 7's very first, by-the-book speak (61 words, 3 sentences,
+`wait_for_playout=True`) returned `played: false` on a perfectly healthy playout: under D17's
+TOKEN aggregation the whole utterance is synthesized before any audio plays, so playout
+started 17.8 s after queueing and ended at +36.2 s — past the flat
+`PLAYOUT_TIMEOUT_SECS = 30`. The `reason` text was accurate (the tester verified the audio
+via `listen()`), but the flag lied on exactly the long-first-utterance shape rounds 5–6 made
+the recommended pattern.
+
+**Decided:** window = `PLAYOUT_TIMEOUT_SECS + PLAYOUT_SECS_PER_WORD * words`, with
+`PLAYOUT_SECS_PER_WORD = 0.8` — ~2x the measured audio rate (Kokoro af_heart ≈ 0.3 s/word;
+round 7 measured queue→playout-end ≈ 2x audio duration under STT CPU contention). The
+`server.py` IPC deadline mirrors the formula (`60.0 + 0.8 * words`, literal + comment, not
+imported — D15's ordering rule, parent stays pipecat-free).
+
+**Also closed with parent-side proof (extends D17's closure):** the tester again measured
+"slow" speak/arm returns (4.5–9 s). The parent log shows the arm's `CallToolRequest`
+processed at 11:16:56 and the child armed at 11:16:56.608 — the entire server-side path is
+~10 ms; the gap is the caller's own LLM turnaround before the HTTP request lands. Not a
+defect; the D17 guidance (arm early) stands.
+
+**Rejected:** a two-phase wait (bounded wait for `tester_speech_started`, then open-ended
+wait for the stop) — more precise but more machinery, and the single scaled bound already
+covers the failure shape with a 2x margin. Also rejected: raising the flat timeout — it
+would make the pathological case (audio truly never playing) block every diagnosis for
+minutes.

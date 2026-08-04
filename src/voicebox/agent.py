@@ -104,6 +104,15 @@ VAD_STOP_SECS = 1.0
 # something uninformative buys nothing.
 PLAYOUT_TIMEOUT_SECS = 30.0
 
+# Per-word extension of the playout window. TOKEN aggregation (D17) synthesizes
+# the whole utterance before any audio plays, so time-to-playout-end is roughly
+# 2x the audio duration under STT CPU contention (round 7: a healthy 61-word
+# speak hit playout end 36.2 s after queueing — past a flat 30 s window).
+# Kokoro af_heart measures ~0.3 s of audio per word; 0.8 s/word budgets ~2x
+# that on top of the base. Mirrored (not imported) in server.py's IPC deadline,
+# which must outlive this window (D15).
+PLAYOUT_SECS_PER_WORD = 0.8
+
 # How long the aggregator's watchdog lets a user turn sit stopped-but-textless
 # before force-closing it. pipecat's 5 s default assumes streaming STT, where a
 # transcript trails speech by well under a second. Ours is batch Whisper on
@@ -709,7 +718,10 @@ class PipecatMCPAgent:
                 audio has finished playing out, reporting the playout span
                 (``started_at`` / ``finished_at`` / ``interrupted``). It says
                 nothing about the app bot — it waits for our Kokoro audio to
-                finish. Ignored when ``when`` is set (the call returns
+                finish. The observation window scales with text length
+                (``PLAYOUT_TIMEOUT_SECS`` + ``PLAYOUT_SECS_PER_WORD`` per
+                word) because the whole utterance is synthesized before any
+                audio plays. Ignored when ``when`` is set (the call returns
                 immediately with ``{"armed": True}``).
             wait_for_turn: When True, block until the app bot is NOT currently
                 speaking, then speak. If already silent, speak immediately. This
@@ -787,22 +799,23 @@ class PipecatMCPAgent:
         # One tracked playout at a time: the tester's speaking frames carry no
         # utterance identity, so overlapping waited speaks could not be told
         # apart.
+        playout_window = round(PLAYOUT_TIMEOUT_SECS + PLAYOUT_SECS_PER_WORD * len(text.split()), 1)
         async with self._playout_lock:
             self._playout = _Playout()
             try:
                 await self._queue_speak_frames(text)
-                result = await asyncio.wait_for(self._playout.future, timeout=PLAYOUT_TIMEOUT_SECS)
+                result = await asyncio.wait_for(self._playout.future, timeout=playout_window)
             except asyncio.TimeoutError:
                 # The audio was queued; what failed is the evidence that it
                 # played. Raising here told the caller nothing about which half
                 # broke — TTS, transport, or the page's audio graph — so report
                 # it instead and let them read listen() to find out.
-                logger.warning(f"playout not observed within {PLAYOUT_TIMEOUT_SECS}s")
+                logger.warning(f"playout not observed within {playout_window}s")
                 return {
                     "queued": True,
                     "played": False,
                     "reason": (
-                        f"no tester_speech_stopped observed within {PLAYOUT_TIMEOUT_SECS}s of "
+                        f"no tester_speech_stopped observed within {playout_window}s of "
                         "queueing; the speech may still play. Check listen() for "
                         "tester_speech_started and client_connected."
                     ),

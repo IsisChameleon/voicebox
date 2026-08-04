@@ -238,8 +238,11 @@ async def speak(
             audio has finished playing out, with ``started_at`` / ``finished_at``
             wall-clock seconds and an ``interrupted`` flag — useful for
             timing-sensitive scripts. This waits for our Kokoro audio to finish;
-            it says nothing about the app bot. Ignored when ``when`` is set (the
-            call returns immediately).
+            it says nothing about the app bot. Expect the call to block for
+            roughly TWICE the utterance's audio duration (the whole text is
+            synthesized before any audio plays); the observation window scales
+            with text length, so long texts are fine. Ignored when ``when`` is
+            set (the call returns immediately).
         wait_for_turn: When true, wait until the app bot is not currently
             speaking, then speak (the polite path). Speaks immediately if it is
             already silent. The result carries ``waited_for_turn_secs`` — how
@@ -275,9 +278,11 @@ async def speak(
         # silent, and the app bot decides when that is.
         deadline = 150.0
     elif wait_for_playout:
-        # Must outlive the agent's own PLAYOUT_TIMEOUT_SECS (30 s), so the
-        # caller gets the agent's diagnosis rather than an IPC timeout.
-        deadline = 60.0
+        # Must outlive the agent's playout window (PLAYOUT_TIMEOUT_SECS = 30 s
+        # + PLAYOUT_SECS_PER_WORD = 0.8 s/word in agent.py — mirrored, not
+        # imported: the parent never loads pipecat), so the caller gets the
+        # agent's diagnosis rather than an IPC timeout.
+        deadline = 60.0 + 0.8 * len(text.split())
     else:
         deadline = 60.0
     return await send_command(

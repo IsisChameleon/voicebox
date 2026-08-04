@@ -30,6 +30,7 @@ async def test_playout_timeout_returns_diagnostic(monkeypatch: pytest.MonkeyPatc
     # E2: audio that never plays out must come back as a diagnosis the caller
     # can act on. It used to raise, which said nothing about which half failed.
     monkeypatch.setattr(agent_module, "PLAYOUT_TIMEOUT_SECS", 0.2)
+    monkeypatch.setattr(agent_module, "PLAYOUT_SECS_PER_WORD", 0.0)
     agent = _agent_ready_to_speak()
 
     result = await agent.speak("hello", wait_for_playout=True)
@@ -44,12 +45,27 @@ async def test_playout_timeout_returns_diagnostic(monkeypatch: pytest.MonkeyPatc
 async def test_playout_timeout_does_not_raise(monkeypatch: pytest.MonkeyPatch):
     # The same story from the caller's side: no exception to catch, ever.
     monkeypatch.setattr(agent_module, "PLAYOUT_TIMEOUT_SECS", 0.2)
+    monkeypatch.setattr(agent_module, "PLAYOUT_SECS_PER_WORD", 0.0)
     agent = _agent_ready_to_speak()
 
     try:
         await agent.speak("hello", wait_for_playout=True)
     except Exception as e:  # pragma: no cover - the assertion is the point
         pytest.fail(f"speak(wait_for_playout=True) raised {e!r} instead of reporting")
+
+
+async def test_playout_window_scales_with_text_length(monkeypatch: pytest.MonkeyPatch):
+    # Round 7: a healthy 61-word speak hit playout end 36.2 s after queueing —
+    # past the flat 30 s window — because the whole utterance is synthesized
+    # before any audio plays (D17). The window must grow with the text.
+    monkeypatch.setattr(agent_module, "PLAYOUT_TIMEOUT_SECS", 0.1)
+    monkeypatch.setattr(agent_module, "PLAYOUT_SECS_PER_WORD", 0.05)
+    agent = _agent_ready_to_speak()
+
+    result = await agent.speak("one two three four", wait_for_playout=True)
+
+    assert result["played"] is False
+    assert "0.3" in result["reason"]  # 0.1 + 4 words * 0.05
 
 
 async def test_successful_playout_reports_played(monkeypatch: pytest.MonkeyPatch):
