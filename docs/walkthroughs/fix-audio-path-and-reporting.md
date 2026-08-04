@@ -1,8 +1,8 @@
 # Walkthrough — `fix/audio-path-and-reporting`
 
 *Status: **complete**. Started 2026-07-29, walkthrough opened 2026-08-01 (see `BUILDLOG.md` D1),
-all tasks landed 2026-08-04. Task I (shim diagnostics artifacts, D22) added post-review the same
-day. Branched from `eb89647`.*
+all tasks landed 2026-08-04. Task I (shim diagnostics artifacts, D22) and Task J (startup
+handshake totality, D23) added post-review the same day. Branched from `eb89647`.*
 
 Fixes the audio-path and reporting defects found in a dogfood session. Root causes:
 [`docs/specs/2026-07-29-field-report-triage.md`](../specs/2026-07-29-field-report-triage.md).
@@ -23,6 +23,7 @@ Task breakdown and success criteria:
 | **G** | Kokoro plays one utterance as one turn (no mid-utterance silence) | `57d9527` | [t-g-kokoro-single-turn.md](../artefacts/fix-audio-path-and-reporting/t-g-kokoro-single-turn.md) | ✅ |
 | **H** | `listen()` batches time-ordered; docstrings state what timestamps mean | `61aa484` | [t-h-listen-ordering-docstrings.md](../artefacts/fix-audio-path-and-reporting/t-h-listen-ordering-docstrings.md) | ✅ |
 | **I** | Shim diagnostics become artifacts: `shim.log` + `shim_diag.json` in `record_dir` | `1551a90` | [t-i-shim-diagnostics-artifacts.md](../artefacts/fix-audio-path-and-reporting/t-i-shim-diagnostics-artifacts.md) | ✅ |
+| **J** | Startup handshake covers every pre-readiness child failure, not just `page.goto` onward | `652bd88` | [t-j-startup-handshake-total.md](../artefacts/fix-audio-path-and-reporting/t-j-startup-handshake-total.md) | ✅ |
 
 Live-only (🔴) acceptance stories across all tasks need a running voice app on
 `localhost:3000` and are collected in the execution spec; they are the checklist for the next
@@ -304,3 +305,33 @@ not yet observed live — all on round 7's checklist. Full list in the evidence 
 
 **Not covered:** a real WebRTC session's tap lines and the `snapshot_error` path — see the
 artefact's "Not covered" section.
+
+---
+
+## Task J — startup handshake covers every pre-readiness child failure (post-review, D23)
+
+*Commit `652bd88`. Decision: `BUILDLOG.md` D23.*
+
+- Origin: `_run_browser_async` only reported failures from `page.goto`/`_wait_for_shim`
+  onward. A failure earlier in the child — Playwright driver startup, `chromium.launch()`
+  (e.g. `playwright install` never run), context or page creation — raised out of the
+  coroutine without touching `startup_queue`, so the parent blocked for the full
+  `startup_timeout` (60 s) and raised the misleading "failed to become ready" message instead
+  of the child's actual error.
+- The handshake is now single-shot and total: every child exit path before readiness puts
+  exactly one `{"ok": False, "error": ...}` on `startup_queue`
+  (`src/voicebox/browser_session.py:265-352`); a `started` flag suppresses any further queue
+  writes after the `{"ok": True}` handshake — a post-startup failure is logged, never queued,
+  so a stray message can't be misread by a future reader of the queue.
+- Resource teardown is guarded per-handle (`context`/`browser`/`page` may each be `None` when
+  the failure preceded their creation); the D22 invariant (shim diag snapshot before
+  `context.close()`) now applies exactly when a page exists.
+- Rejected: parent-side `is_alive()` polling alongside the queue wait — only helps against
+  SIGKILL/OOM child death (no Python exception handling runs at all), a case rare enough that
+  the extra polling loop and its own race windows don't earn their cost.
+
+**Try it:** `uv run pytest tests/test_browser_session.py -k launch_failure`
+
+**Not covered:** a failure between page creation and `page.goto` (e.g. `add_init_script`
+raising) is covered by code inspection only, not a dedicated test; SIGKILL/OOM child death is
+explicitly out of scope (D23) — see the artefact's "Not covered" section.
