@@ -450,3 +450,26 @@ final turn), and transcript delivery is structurally one-turn-behind under the c
 `UserTurnController`. Per-segment transcript emission (observer watching `TranscriptionFrame`
 directly, no aggregator) would fix both and delete the watchdog dance — that is the
 "drop `LLMContextAggregatorPair`" design task the execution spec already names.
+
+---
+
+## D18 — `wait_for_turn` reports how long it blocked instead of documenting the opacity
+
+*2026-08-04. Task H, branch `fix/audio-path-and-reporting`.*
+
+**Context:** round 1 flagged that `speak(wait_for_turn=True)` returns the same bare
+`{queued: true}` as the ungated path — a caller cannot tell whether the polite gate waited
+40 s or the bot was already silent, and rounds 4–6 showed testers repeatedly misattributing
+their own timing to voicebox. Task H's brief left the fix open: add a small honest key or
+document the opacity.
+
+**Decided:** add `waited_for_turn_secs` (monotonic span around `_wait_for_app_bot_silent`,
+rounded to ms) to every `speak(wait_for_turn=True)` result shape — ungated returns keep the
+bare shape, so the key's presence itself marks the gated path. Four lines in `agent.py`, no
+IPC change (the dict passes through verbatim), pinned by
+`test_wait_for_turn_reports_wait_duration` / `test_ungated_speak_has_no_wait_key`.
+
+**Rejected:** documenting the opacity only — the number already exists server-side, is
+exactly what the round-4/5/6 "is voicebox slow or am I?" confusions needed, and costs less
+to report than to explain away. Also rejected: a boolean `waited` — same cost, strictly
+less information.

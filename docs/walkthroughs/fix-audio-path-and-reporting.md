@@ -20,7 +20,7 @@ Task breakdown and success criteria:
 | **E** | Transcription leaves the frame path (non-blocking Whisper worker) | `32b1d6c` | [t-e-nonblocking-stt.md](../artefacts/fix-audio-path-and-reporting/t-e-nonblocking-stt.md) | ✅ |
 | **F** | Transcript-loss holes closed (drain STT before writing artefacts) | `5d67578` | [t-f-transcript-loss-holes.md](../artefacts/fix-audio-path-and-reporting/t-f-transcript-loss-holes.md) | ✅ |
 | **G** | Kokoro plays one utterance as one turn (no mid-utterance silence) | `57d9527` | [t-g-kokoro-single-turn.md](../artefacts/fix-audio-path-and-reporting/t-g-kokoro-single-turn.md) | ✅ |
-| **H** | `listen()` batches time-ordered; docstrings state what timestamps mean | — | — | ⬜ |
+| **H** | `listen()` batches time-ordered; docstrings state what timestamps mean | `61aa484` | [t-h-listen-ordering-docstrings.md](../artefacts/fix-audio-path-and-reporting/t-h-listen-ordering-docstrings.md) | ✅ |
 
 Live-only (🔴) acceptance stories across all tasks need a running voice app on
 `localhost:3000` and are collected in the execution spec; they are the checklist for the next
@@ -242,3 +242,26 @@ evidence artefact.
 **Not covered:** G4 🔴 (the app logs one user turn) and the speak-latency delta are queued
 for the post-G blind round; the barge-in synthesize-at-arm idea stays a recorded follow-up.
 Full list in the evidence artefact.
+
+---
+
+## Task H — ordered `listen()` batches, honest docstrings
+
+*Commit `61aa484`. Criteria: execution spec § "Task H". Decision: `BUILDLOG.md` D18.*
+
+- `listen_events` returns each batch **sorted by `t`** (stable — equal-`t` events keep append
+  order) while the cursor stays `cursor + len(events)` on the append-ordered log, so paging
+  never skips or repeats an event. Deliberately the weak form: a late event whose `t` predates
+  an already-read batch still arrives in a later batch; the docstrings say to merge on `t`.
+- Docstring pass pays the rounds-1–6 debt: `tester_transcript.t` = `speak()` call time;
+  `transcription_lag_secs` 0.0 ≠ "nothing pending" (open-turn blind spot, D11/D14); barge-in
+  arming is instant server-side (~1 ms, D17) so arm early, one-shot, no disarm, audio at
+  `timer_secs` + synthesis; `stop()`'s drained transcripts land after `session_stopped` (read
+  `events.json`).
+- Round-1's judged-scope item resolved per **D18**: `speak(wait_for_turn=True)` results now
+  carry `waited_for_turn_secs` (how long the silence gate blocked); the ungated shape is
+  unchanged, so the key's presence marks the gated path.
+
+**Not covered:** sort exercised on synthetic logs only (post-D/E skew is ms-scale by design);
+new `server.py` docstrings reach clients only after the pending server restart; the new key is
+not yet observed live — all on round 7's checklist. Full list in the evidence artefact.
