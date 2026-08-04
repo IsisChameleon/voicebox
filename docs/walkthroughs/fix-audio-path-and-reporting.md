@@ -1,7 +1,7 @@
 # Walkthrough — `fix/audio-path-and-reporting`
 
-*Status: **in progress**. Started 2026-07-29, walkthrough opened 2026-08-01 (see `BUILDLOG.md` D1).
-Branched from `eb89647`.*
+*Status: **complete**. Started 2026-07-29, walkthrough opened 2026-08-01 (see `BUILDLOG.md` D1),
+all tasks landed 2026-08-04. Branched from `eb89647`.*
 
 Fixes the audio-path and reporting defects found in a dogfood session. Root causes:
 [`docs/specs/2026-07-29-field-report-triage.md`](../specs/2026-07-29-field-report-triage.md).
@@ -39,6 +39,7 @@ are diagnosed, fixed and committed before the next.
 | **4** (post-F+G) | `f90c358` (D15: stop deadline 210 s, watchdog 240 s, per-session debug log) | [r4-blind-verification.md](../artefacts/fix-audio-path-and-reporting/r4-blind-verification.md) | ✅ |
 | **5** (F1 prompt-stop live: PASS) | `69a716f` (D16: Kokoro warm-up, debug log in artifacts) | [r5-blind-verification.md](../artefacts/fix-audio-path-and-reporting/r5-blind-verification.md) | ✅ |
 | **6** (multi-sentence stress) | `248446c` (D17: TOKEN aggregation — one speak() = one synthesis) | [r6-blind-verification.md](../artefacts/fix-audio-path-and-reporting/r6-blind-verification.md) | ✅ |
+| **7** (post-H: D16/D17/D18 live, H paging) | `3d965a7` (D19: playout window scales with text length) | [r7-blind-verification.md](../artefacts/fix-audio-path-and-reporting/r7-blind-verification.md) | ✅ |
 
 Round 1 confirmed A3/A4 and D3 live, confirmed the specced F and G holes, answered **C3**
 (the ~24 s lag is Whisper's lazy decode freezing the event loop — not smart-turn inference,
