@@ -92,7 +92,9 @@ class TesterTranscriptEvent(VoiceboxEvent):
 
     Unlike ``app_bot_transcript`` (recovered from audio via STT), this is the
     ground-truth input string — exact, and emitted at speak time rather than
-    after batch STT.
+    after batch STT. ``t`` is therefore the ``speak()`` call time by design:
+    NOT when the audio played (see ``tester_speech_started``/``stopped`` for
+    the playout span) and not an STT measurement.
     """
 
     type: EventType = EventType.TESTER_TRANSCRIPT

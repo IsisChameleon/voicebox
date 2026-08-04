@@ -167,6 +167,37 @@ def test_whisper_model_is_wrapped_eager(monkeypatch: pytest.MonkeyPatch):
     assert isinstance(service._model, EagerSegmentsWhisperModel)
 
 
+async def test_wait_for_turn_reports_wait_duration():
+    # Round 1 ergonomics: wait_for_turn=True returned a bare {queued: true},
+    # indistinguishable from the ungated path. The result must say how long
+    # the turn gate actually blocked.
+    agent = _agent_ready_to_speak()
+    agent._app_bot_speaking = True
+
+    async def fall_silent_shortly():
+        await asyncio.sleep(0.1)
+        async with agent._event_cond:
+            agent._app_bot_speaking = False
+            agent._event_cond.notify_all()
+
+    task = asyncio.create_task(fall_silent_shortly())
+    result = await agent.speak("hello", wait_for_turn=True)
+    await task
+
+    assert result["queued"] is True
+    assert 0.1 <= result["waited_for_turn_secs"] < 5.0
+
+
+async def test_ungated_speak_has_no_wait_key():
+    # The key is what distinguishes the polite path — the ungated result must
+    # not carry it.
+    agent = _agent_ready_to_speak()
+
+    result = await agent.speak("hello")
+
+    assert result == {"queued": True}
+
+
 def test_turn_stop_timeout_outlives_batch_stt():
     # pipecat's 5 s watchdog default assumes streaming STT. Batch Whisper
     # delivers text ~0.5x realtime AFTER the VAD stop, so at 5 s every long

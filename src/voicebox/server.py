@@ -157,6 +157,13 @@ async def listen(timeout: float = 30.0, cursor: int = 0) -> dict:
     cursor. Pass the returned ``cursor`` to the next call to resume without
     missing or re-reading anything; ``cursor=0`` replays the whole session.
 
+    Each batch is sorted by ``t``, so it reads as a conversation — but the
+    cursor tracks arrival order, and a slow transcript arrives long after the
+    speech events it belongs to. An event whose ``t`` predates a batch you
+    already read can therefore still show up in a LATER batch; when
+    reconstructing a timeline across batches, merge on ``t``, not on batch
+    order.
+
     Two parties: ``app_bot`` is the app's voice agent under test; ``tester``
     is our synthetic human (Kokoro TTS). Event types (each has ``"t"``,
     wall-clock seconds):
@@ -175,7 +182,9 @@ async def listen(timeout: float = 30.0, cursor: int = 0) -> dict:
         ``tester_speech_interrupted`` — OUR synthetic voice starting /
         finishing / being cut off at playout.
       * ``tester_transcript`` — the exact text WE spoke (``text``); the
-        ground-truth ``speak()`` input, emitted at speak time (not via STT).
+        ground-truth ``speak()`` input. Its ``t`` is the ``speak()`` CALL
+        time — not playout and not an STT result (playout start/end are the
+        ``tester_speech_*`` events).
 
     To simply wait for the next thing the app bot says: call in a loop with
     the advancing cursor and act on ``app_bot_transcript`` events.
@@ -194,7 +203,10 @@ async def listen(timeout: float = 30.0, cursor: int = 0) -> dict:
         ``transcription_lag_secs`` is how long the oldest un-transcribed
         utterance has been waiting on Whisper: non-zero with no events means a
         transcript is still coming, so call again rather than concluding the
-        app bot said nothing.
+        app bot said nothing. The converse does NOT hold: it measures the STT
+        queue only, and text already decoded but held by a still-open turn
+        reads 0.0 — treat 0.0 as "no evidence", never as proof that nothing
+        is pending.
 
     """
     # Parent-side deadline: the child enforces `timeout` on the event wait,
@@ -230,12 +242,19 @@ async def speak(
             call returns immediately).
         wait_for_turn: When true, wait until the app bot is not currently
             speaking, then speak (the polite path). Speaks immediately if it is
-            already silent.
+            already silent. The result carries ``waited_for_turn_secs`` — how
+            long the gate actually blocked (0.0 = already silent).
         when: An event type to arm a ONE-SHOT barge-in trigger on. When set,
             returns ``{"armed": True}`` immediately, then in the background
             waits for the NEXT occurrence of that event, sleeps ``timer_secs``,
             and speaks. Canonical use:
-            ``when="app_bot_speech_started", timer_secs=1.5``.
+            ``when="app_bot_speech_started", timer_secs=1.5``. TIMING: arming
+            is instantaneous server-side (~1 ms measured) — any delay you
+            observe before the arm is your own turnaround, so arm EARLY, even
+            while a previous utterance is still playing. The trigger fires on
+            the next matching event AFTER the arm and there is no disarm short
+            of ``stop()``. Expect audible speech ``timer_secs`` + TTS
+            synthesis (~3–9 s measured) after the trigger event.
         timer_secs: Seconds to wait after the ``when`` event fires before
             speaking. Only meaningful with ``when``.
 
@@ -245,7 +264,8 @@ async def speak(
         timing fields (``started_at`` / ``finished_at`` / ``interrupted``) or a
         ``reason`` explaining why the playout was never observed. A
         ``played: false`` result is a diagnosis, not an error: the speech was
-        queued and may still be playing.
+        queued and may still be playing. ``wait_for_turn`` adds
+        ``waited_for_turn_secs`` to whichever shape applies.
 
     """
     if when is not None:
@@ -285,6 +305,11 @@ async def stop() -> dict:
     your side while the teardown still completes: the artifact files land
     in ``record_dir`` regardless, so poll that directory instead of
     retrying ``stop()``.
+
+    Drained transcripts are appended AFTER the ``session_stopped`` event, so
+    a listen loop that exits on ``session_stopped`` never sees them — read
+    the final utterances from the ``events.json`` artifact, which is written
+    after the drain and contains them.
 
     Returns:
         ``{"stopped": true}``. When the session ran with ``record_dir``, also

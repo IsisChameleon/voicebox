@@ -22,6 +22,7 @@ lives.
 
 import asyncio
 import sys
+import time
 from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
@@ -632,6 +633,13 @@ class PipecatMCPAgent:
     async def listen_events(self, timeout: float, cursor: int = 0) -> dict:
         """Return the events past ``cursor``, blocking until at least one exists.
 
+        The returned batch is sorted by ``t`` (stable: equal-``t`` events keep
+        append order), but the cursor tracks APPEND order — the sort cannot
+        reach across a cursor boundary, so an event whose ``t`` predates a
+        batch you already read still arrives in a later batch. Notably,
+        ``tester_transcript.t`` is stamped at ``speak()`` call time (the
+        ground-truth input, not an STT or playout measurement).
+
         Args:
             timeout: Max seconds to wait for a new event past the cursor.
                 On timeout, returns an empty ``events`` list.
@@ -641,9 +649,10 @@ class PipecatMCPAgent:
 
         Returns:
             ``{"events": [...], "cursor": <next cursor>, "transcription_lag_secs": <float>}``.
-            The lag is the age of the oldest segment still waiting on Whisper —
-            non-zero means "a transcript is coming", which is what tells an
-            empty ``events`` list apart from silence.
+            The lag is the age of the oldest audio segment still queued for
+            Whisper — non-zero means "a transcript is coming". The converse
+            does NOT hold: decoded text held by the aggregator's still-open
+            turn reads 0.0 (D11/D14), so 0.0 is not proof nothing is pending.
 
         """
         if not self._started:
@@ -667,7 +676,10 @@ class PipecatMCPAgent:
             # transcript is guaranteed to be pending.
             await asyncio.sleep(0.05)
         return {
-            "events": [e.model_dump() for e in events],
+            # Sorted view for the reader; the cursor stays append-order
+            # arithmetic (sorted() is stable, len is unchanged), so paging
+            # never skips or repeats an event.
+            "events": [e.model_dump() for e in sorted(events, key=lambda e: e.t)],
             "cursor": cursor + len(events),
             "transcription_lag_secs": round(self._stt.transcription_lag_secs, 3),
         }
@@ -701,12 +713,20 @@ class PipecatMCPAgent:
                 immediately with ``{"armed": True}``).
             wait_for_turn: When True, block until the app bot is NOT currently
                 speaking, then speak. If already silent, speak immediately. This
-                gates the START of our speech (the polite path).
+                gates the START of our speech (the polite path). The result
+                carries ``waited_for_turn_secs`` — how long the gate actually
+                blocked (0.0 = the bot was already silent).
             when: An ``EventType`` value. When set, arm a ONE-SHOT trigger:
                 return ``{"armed": True}`` immediately, then in the background
                 wait for the NEXT occurrence of that event, sleep
                 ``timer_secs``, and speak ``text`` (canonical barge-in:
-                ``when="app_bot_speech_started", timer_secs=1.5``).
+                ``when="app_bot_speech_started", timer_secs=1.5``). Arming is
+                instantaneous server-side (command receipt → armed event
+                measured at ~1 ms), so arm EARLY — even before a prior
+                utterance finishes; the trigger only reacts to events arriving
+                after the arm, and there is no disarm short of ``stop()``.
+                Audio lands ``timer_secs`` plus TTS synthesis (~3–9 s measured
+                live) after the trigger event.
             timer_secs: Seconds to sleep after the ``when`` event fires before
                 speaking. Only meaningful with ``when``.
 
@@ -714,7 +734,8 @@ class PipecatMCPAgent:
             ``{"armed": True}`` immediately when ``when`` is set;
             ``{"queued": True}`` when ``wait_for_playout`` is False; otherwise
             ``{"queued": True, "started_at", "finished_at", "interrupted"}``
-            (wall-clock seconds).
+            (wall-clock seconds). ``wait_for_turn`` adds
+            ``waited_for_turn_secs`` to whichever shape applies.
 
         Raises:
             ValueError: If both ``when`` and ``wait_for_turn`` are set, or if
@@ -747,8 +768,13 @@ class PipecatMCPAgent:
 
         await self._connected.wait()
 
+        # Distinguishes the polite path's result from the ungated one (round-1
+        # ergonomics finding): how long the turn gate actually blocked.
+        turn_wait: dict = {}
         if wait_for_turn:
+            wait_started = time.monotonic()
             await self._wait_for_app_bot_silent()
+            turn_wait["waited_for_turn_secs"] = round(time.monotonic() - wait_started, 3)
 
         # Log what we said (ground-truth input, not STT) so the event stream is
         # a complete two-sided transcript.
@@ -756,7 +782,7 @@ class PipecatMCPAgent:
 
         if not wait_for_playout:
             await self._queue_speak_frames(text)
-            return {"queued": True}
+            return {"queued": True, **turn_wait}
 
         # One tracked playout at a time: the tester's speaking frames carry no
         # utterance identity, so overlapping waited speaks could not be told
@@ -780,10 +806,11 @@ class PipecatMCPAgent:
                         "queueing; the speech may still play. Check listen() for "
                         "tester_speech_started and client_connected."
                     ),
+                    **turn_wait,
                 }
             finally:
                 self._playout = None
-        return {"queued": True, "played": True, **result}
+        return {"queued": True, "played": True, **result, **turn_wait}
 
     async def _wait_for_app_bot_silent(self):
         """Block until the app bot is not currently speaking."""
