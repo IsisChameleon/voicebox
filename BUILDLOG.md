@@ -505,3 +505,61 @@ wait for the stop) — more precise but more machinery, and the single scaled bo
 covers the failure shape with a 2x margin. Also rejected: raising the flat timeout — it
 would make the pathological case (audio truly never playing) block every diagnosis for
 minutes.
+
+---
+
+## D20 — `_Playout` counts and skips prior utterances' TTS stops
+
+*2026-08-04. Review pass (post round 7), branch `fix/audio-path-and-reporting`.*
+
+**Context:** the review found the observer forwards every `TTSStoppedFrame` /
+`BotStoppedSpeakingFrame` to whatever `_Playout` currently exists, and the playout lock
+serializes only *waited* speaks — so an unwaited speak (or a fired barge-in, which the docs
+explicitly encourage overlapping) still in flight when a waited speak installs its tracker
+would resolve the waited speak with the PRIOR utterance's playout end: `played: true` with
+another utterance's timestamps, before the waited text played at all. The class docstring
+claimed the lock covered this; it did not.
+
+**Decided:** count-based attribution. D17's TOKEN invariant makes one `speak()` exactly one
+`TTSStoppedFrame`, so the agent tracks `_tts_pending` (incremented per `_queue_speak_frames`,
+decremented per observed stop, reset on interruption) and a `_Playout` installed while it is
+non-zero skips that many stops before treating the next one as its own. Resolution is now
+correctly ours; `started_at` can still inherit a prior utterance's start when audio runs
+continuously into ours (frames carry no identity — documented, bounded). Pinned by
+`test_playout_ignores_prior_utterances_frames`.
+
+**Also landed (same review):** fire-and-forget tasks (`warm_up`, `_start_recording`, armed
+triggers) now go through `_spawn_task` — strong refs so the loop cannot GC them mid-flight,
+and failures are logged instead of dying as unretrieved exceptions (an armed barge-in that
+crashed after arming was previously indistinguishable from a trigger that never fired).
+
+**Rejected:** utterance-identity plumbing through the TTS/transport frames — pipecat 1.3.0's
+frames carry none, so it would mean wrapping frame types the whole pipeline passes around;
+the count is sufficient for resolution correctness.
+
+---
+
+## D21 — `server.py` deadlines get a test seam; the combined-gates hole is closed (revises r4's "no seam" note)
+
+*2026-08-04. Review pass (post round 7), branch `fix/audio-path-and-reporting`.*
+
+**Context:** all three review lenses independently found the same bug: the speak deadline's
+`if/elif` chain gave `wait_for_turn=True` + `wait_for_playout=True` a flat 150 s, dropping
+D19's per-word playout allowance — the gates compose agent-side, so a long text after a long
+turn wait blew the IPC deadline and surfaced as a `TimeoutError` instead of the agent's
+diagnosis (the exact failure class D15 exists to prevent; both docstrings advertise
+combining the flags). Round 4's artefact had recorded "the deadline fix has no parent-side
+test seam — the comment carries the constraint"; the review showed comments don't hold: the
+mirrored literals and the drain-cap/watchdog ordering were pinned by nothing.
+
+**Decided:** extract `_speak_deadline()` plus named module constants
+(`SPEAK_DEADLINE_BASE_SECS`, `TURN_WAIT_DEADLINE_SECS`, `PLAYOUT_DEADLINE_SECS_PER_WORD`,
+`STOP_DEADLINE_SECS`) in `server.py` — still literals, still no pipecat import in the parent —
+and pin the cross-process invariants in `tests/test_server_deadlines.py` (deadline ≥ agent
+window + margin for every gate combo, per-word mirror equality, stop deadline ≥ drain cap,
+armed deadline flat) plus `TURN_STOP_TIMEOUT_SECS > DRAIN_CAP_SECS` in the existing watchdog
+test (its old floor was 60 s — *below* the cap it must outlive).
+
+**Rejected:** importing the agent constants into `server.py` to kill the mirror — breaks the
+parent's pipecat-free hot-reload contract (D15's precedent); the test process may import both
+sides freely, which is exactly where the equality belongs.

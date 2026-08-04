@@ -206,20 +206,25 @@ class _Playout:
 
     The tester's BotStarted/StoppedSpeakingFrame carry no utterance identity,
     so only one waited speak is tracked at a time (guarded by a lock in
-    ``speak``). Kokoro hands the transport the whole utterance as one gap-free
-    span (Task G), so the playout is over at the first
-    ``BotStoppedSpeakingFrame`` that follows the utterance's
-    ``TTSStoppedFrame`` — no silence timer. An interruption resolves it
-    immediately.
+    ``speak``), and utterances queued BEFORE this one (an unwaited speak, an
+    armed barge-in) are told apart by count: TOKEN aggregation (D17) makes one
+    ``speak()`` exactly one ``TTSStoppedFrame``, so ``skip_tts_stops`` — the
+    number of utterances still owing one at install time — says how many to
+    ignore before the next one is ours. Kokoro hands the transport the whole
+    utterance as one gap-free span (Task G), so the playout is over at the
+    first ``BotStoppedSpeakingFrame`` that follows OUR ``TTSStoppedFrame`` —
+    no silence timer. An interruption resolves it immediately (it kills all
+    queued audio, ours included).
     """
 
-    def __init__(self):
+    def __init__(self, skip_tts_stops: int = 0):
         self._loop = asyncio.get_event_loop()
         self.future: asyncio.Future[dict] = self._loop.create_future()
         self.started_at: Optional[float] = None
         self._last_stopped_at: Optional[float] = None
         self.interrupted: bool = False
         self._tts_finished: bool = False
+        self._skip_tts_stops: int = skip_tts_stops
 
     def on_started(self, t: float):
         """Record the playout's first audio start."""
@@ -229,9 +234,14 @@ class _Playout:
     def on_tts_stopped(self):
         """Mark the utterance fully synthesized and handed to the transport.
 
-        ``TTSStoppedFrame`` travels ahead of the buffered audio's playout, so
-        the next ``BotStoppedSpeakingFrame`` is the audio actually ending.
+        The first ``skip_tts_stops`` calls belong to utterances queued before
+        ours and are ignored. ``TTSStoppedFrame`` travels ahead of the buffered
+        audio's playout, so once ours arrives the next
+        ``BotStoppedSpeakingFrame`` is the audio actually ending.
         """
+        if self._skip_tts_stops > 0:
+            self._skip_tts_stops -= 1
+            return
         self._tts_finished = True
 
     def on_stopped(self, t: float):
@@ -292,6 +302,14 @@ class PipecatMCPAgent:
         # In-flight speak(wait_for_playout=True) playout tracking — one at a time.
         self._playout: Optional[_Playout] = None
         self._playout_lock = asyncio.Lock()
+        # Utterances queued to TTS that have not yet emitted their
+        # TTSStoppedFrame (one each, by D17's TOKEN invariant). A _Playout
+        # installed while this is non-zero must skip that many stops or a
+        # prior utterance's playout end resolves it early.
+        self._tts_pending: int = 0
+        # Strong refs to fire-and-forget tasks (warm-up, recording start) so
+        # the loop cannot GC them mid-flight; exceptions get logged.
+        self._background_tasks: set[asyncio.Task] = set()
 
         # Whether the app bot is currently speaking, toggled by the VAD frames.
         # Lets speak(wait_for_turn=True) block until the bot falls silent.
@@ -306,6 +324,27 @@ class PipecatMCPAgent:
         self._armed_tasks: set[asyncio.Task] = set()
 
         self._started = False
+
+    def _spawn_task(self, coro, name: str, registry: Optional[set] = None) -> asyncio.Task:
+        """Create a task, hold a strong ref, and log (not swallow) its failure.
+
+        The loop keeps only weak refs to tasks, so an un-referenced
+        fire-and-forget task can be GC'd mid-flight, and its exception would
+        surface only as "Task exception was never retrieved" at GC time — an
+        armed barge-in that died after arming would be indistinguishable from
+        a trigger that never fired.
+        """
+        task = asyncio.create_task(coro)
+        tracked = self._background_tasks if registry is None else registry
+        tracked.add(task)
+
+        def _done(t: asyncio.Task):
+            tracked.discard(t)
+            if not t.cancelled() and t.exception() is not None:
+                logger.warning(f"background task '{name}' failed: {t.exception()!r}")
+
+        task.add_done_callback(_done)
+        return task
 
     async def _emit(self, event: VoiceboxEvent):
         """Append an event to the log and wake any pending listen_events()."""
@@ -376,6 +415,9 @@ class PipecatMCPAgent:
                 self._playout.on_stopped(event.t)
             await self._emit(event)
         elif isinstance(frame, InterruptionFrame):
+            # An interruption wipes the pipeline's queued audio, so utterances
+            # still owing a TTSStoppedFrame will never emit one.
+            self._tts_pending = 0
             event = VoiceboxEvent(type=EventType.TESTER_SPEECH_INTERRUPTED)
             if self._playout is not None:
                 self._playout.on_interrupted(event.t)
@@ -383,6 +425,7 @@ class PipecatMCPAgent:
         elif isinstance(frame, TTSStoppedFrame):
             # No event: this is _Playout bookkeeping (the utterance is fully
             # synthesized), not something a listen() caller needs to see.
+            self._tts_pending = max(0, self._tts_pending - 1)
             if self._playout is not None:
                 self._playout.on_tts_stopped()
 
@@ -417,7 +460,7 @@ class PipecatMCPAgent:
         # Runs concurrently with the browser child's own startup; a speak()
         # arriving first just queues behind it on the executor, no worse than
         # the cold path it replaces.
-        asyncio.create_task(tts.warm_up())
+        self._spawn_task(tts.warm_up(), "kokoro_warm_up")
 
         context = LLMContext()
         user_aggregator, assistant_aggregator = self._create_context_aggregators(context)
@@ -491,7 +534,7 @@ class PipecatMCPAgent:
                 await self._audio_buffer.start_recording()
                 logger.info("Audio recording started")
 
-            asyncio.create_task(_start_recording())
+            self._spawn_task(_start_recording(), "start_recording")
 
         self._started = True
         logger.info("Pipecat MCP Agent started!")
@@ -501,8 +544,10 @@ class PipecatMCPAgent:
 
         Returns:
             A dict of absolute artifact paths when ``record_dir`` is set
-            (``{events, metrics, merged_wav, tester_wav, app_bot_wav}``), else
-            ``None``. ``*_wav`` keys are present only when audio was recorded.
+            (``{events, metrics, merged_wav, tester_wav, app_bot_wav,
+            debug_log}``), else ``None``. ``*_wav`` keys are present only when
+            audio was recorded; ``debug_log`` only when the per-session DEBUG
+            sink wrote anything.
 
         """
         if not self._started:
@@ -745,8 +790,10 @@ class PipecatMCPAgent:
         Returns:
             ``{"armed": True}`` immediately when ``when`` is set;
             ``{"queued": True}`` when ``wait_for_playout`` is False; otherwise
-            ``{"queued": True, "started_at", "finished_at", "interrupted"}``
-            (wall-clock seconds). ``wait_for_turn`` adds
+            ``{"queued": True, "played": True, "started_at", "finished_at",
+            "interrupted"}`` (wall-clock seconds) on an observed playout, or
+            ``{"queued": True, "played": False, "reason": ...}`` when the
+            window expired without one. ``wait_for_turn`` adds
             ``waited_for_turn_secs`` to whichever shape applies.
 
         Raises:
@@ -773,9 +820,11 @@ class PipecatMCPAgent:
             # scheduling against the triggering event (and could drop it).
             start = len(self._events)
             await self._emit(TesterBargeInArmedEvent(when=when, timer_secs=timer_secs, text=text))
-            task = asyncio.create_task(self._armed_speak(text, when, timer_secs, start))
-            self._armed_tasks.add(task)
-            task.add_done_callback(self._armed_tasks.discard)
+            self._spawn_task(
+                self._armed_speak(text, when, timer_secs, start),
+                f"armed_speak({when})",
+                registry=self._armed_tasks,
+            )
             return {"armed": True}
 
         await self._connected.wait()
@@ -801,7 +850,9 @@ class PipecatMCPAgent:
         # apart.
         playout_window = round(PLAYOUT_TIMEOUT_SECS + PLAYOUT_SECS_PER_WORD * len(text.split()), 1)
         async with self._playout_lock:
-            self._playout = _Playout()
+            # Utterances already queued (unwaited speaks, a fired barge-in)
+            # each still owe one TTSStoppedFrame; ours is the one after those.
+            self._playout = _Playout(skip_tts_stops=self._tts_pending)
             try:
                 await self._queue_speak_frames(text)
                 result = await asyncio.wait_for(self._playout.future, timeout=playout_window)
@@ -856,6 +907,7 @@ class PipecatMCPAgent:
         """Push the LLM-response frame triplet that drives TTS."""
         if not self._pipeline_task:
             raise RuntimeError("Pipecat MCP Agent not initialized")
+        self._tts_pending += 1
         await self._pipeline_task.queue_frames(
             [
                 LLMFullResponseStartFrame(),

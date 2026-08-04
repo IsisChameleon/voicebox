@@ -182,8 +182,10 @@ _BIAS_NOTES = [
     "shifts text onto a neighbouring turn.",
     "app_response_latency_secs measures the user-perceived wait (tester speech end "
     "to app speech start): the app's endpointing + STT/LLM/TTS think time, not pure "
-    "server compute. tester_speech_stopped is playout-accurate; app_bot_speech_started "
-    "is VAD-onset (~tens of ms lag, unaffected by vad_stop_secs).",
+    "server compute. tester_speech_stopped trails true audio end by ~0.35 s (the "
+    "output transport's silence window), slightly inflating tester talk time and "
+    "deflating app response latency; app_bot_speech_started is VAD-onset (~tens of "
+    "ms lag, unaffected by vad_stop_secs).",
     "app_bot_transcript text arrives after batch Whisper and is utterance-level, not "
     "word-accurate.",
     "a silent gap containing a client_disconnected is an outage_gap, not dead air or "

@@ -38,6 +38,55 @@ mcp = FastMCP(
     json_response=True,
 )
 
+# IPC deadlines. These MIRROR agent-side timing constants as literals — never
+# import them: the parent must not load pipecat (hot-reload contract). The
+# mirrors are pinned against the agent's constants by
+# tests/test_server_deadlines.py, so drift fails the suite instead of
+# re-introducing the round-4 reap-mid-drain bug (D15).
+SPEAK_DEADLINE_BASE_SECS = 60.0
+# Heuristic bound on speak(wait_for_turn=True): the agent-side wait for the
+# app bot to fall silent is unbounded (the app decides), so this caps how long
+# the parent will hold the HTTP call open for it.
+TURN_WAIT_DEADLINE_SECS = 150.0
+# Mirrors agent.PLAYOUT_SECS_PER_WORD (0.8): the agent's playout window is
+# 30 s + 0.8 s/word, and the base already carries a 30 s margin over it.
+PLAYOUT_DEADLINE_SECS_PER_WORD = 0.8
+# Must outlive the agent's STT drain (DRAIN_CAP_SECS = 180 in
+# processors/nonblocking_whisper_stt.py) plus settle + artifact writing. At
+# the old 30 s this timed out mid-drain and the child was reaped BEFORE it
+# wrote events.json/metrics.json — verification round 4 lost its entire
+# artifact set that way.
+STOP_DEADLINE_SECS = 210.0
+
+
+def _speak_deadline(
+    text: str, wait_for_playout: bool, wait_for_turn: bool, when: str | None
+) -> float:
+    """Pick the IPC deadline for a ``speak`` command.
+
+    The gates compose on the agent side — an armed trigger returns
+    immediately; a turn wait blocks first; a playout wait then holds the call
+    for a window that scales with text length — so the deadline must compose
+    the same way (a flat per-gate value silently under-budgeted the combined
+    ``wait_for_turn`` + ``wait_for_playout`` path).
+
+    Args:
+        text: The text to speak (the word count scales the playout window).
+        wait_for_playout: Whether the call holds until playout is observed.
+        wait_for_turn: Whether the call first waits for app-bot silence.
+        when: Barge-in trigger event type, if arming (returns immediately).
+
+    Returns:
+        Deadline in seconds for ``send_command``.
+
+    """
+    if when is not None:
+        return SPEAK_DEADLINE_BASE_SECS  # armed, returns immediately
+    deadline = TURN_WAIT_DEADLINE_SECS if wait_for_turn else SPEAK_DEADLINE_BASE_SECS
+    if wait_for_playout:
+        deadline += PLAYOUT_DEADLINE_SECS_PER_WORD * len(text.split())
+    return deadline
+
 
 def _assert_port_free(port: int, name: str):
     """Raise a clear error if ``port`` is already bound on localhost.
@@ -120,6 +169,7 @@ async def start_browser_session(
               * ``metrics.json`` — the computed report (per-turn response
                 latency, talk-over windows, dead-air gaps, talk ratio,
                 transcripts; see ``stop()`` for the schema).
+              * ``agent-debug.log`` — the session's DEBUG log (timing lines).
 
     Returns:
         ``{cdp_endpoint, audio_ws_url, attach_hint}``. Raises if the page did
@@ -178,6 +228,8 @@ async def listen(timeout: float = 30.0, cursor: int = 0) -> dict:
       * ``app_bot_transcript`` — a finished app-bot utterance: ``text`` plus
         ``turn_started_at`` (ISO timestamp of the turn start). Arrives after
         the corresponding ``app_bot_speech_stopped`` (batch STT).
+        ``transcription_empty: true`` flags an utterance Whisper recovered no
+        text for — the bot spoke, its words are unknown.
       * ``tester_speech_started`` / ``tester_speech_stopped`` /
         ``tester_speech_interrupted`` — OUR synthetic voice starting /
         finishing / being cut off at playout.
@@ -185,6 +237,9 @@ async def listen(timeout: float = 30.0, cursor: int = 0) -> dict:
         ground-truth ``speak()`` input. Its ``t`` is the ``speak()`` CALL
         time — not playout and not an STT result (playout start/end are the
         ``tester_speech_*`` events).
+      * ``tester_barge_in_armed`` / ``tester_barge_in_fired`` — a
+        ``speak(when=...)`` trigger was registered / just fired (``fired``
+        carries ``triggered_by_t``, the ``t`` of the event that tripped it).
 
     To simply wait for the next thing the app bot says: call in a loop with
     the advancing cursor and act on ``app_bot_transcript`` events.
@@ -246,7 +301,9 @@ async def speak(
         wait_for_turn: When true, wait until the app bot is not currently
             speaking, then speak (the polite path). Speaks immediately if it is
             already silent. The result carries ``waited_for_turn_secs`` — how
-            long the gate actually blocked (0.0 = already silent).
+            long the gate actually blocked (0.0 = already silent). Mutually
+            exclusive with ``when`` (an armed trigger already times its own
+            start): combining them is an error.
         when: An event type to arm a ONE-SHOT barge-in trigger on. When set,
             returns ``{"armed": True}`` immediately, then in the background
             waits for the NEXT occurrence of that event, sleeps ``timer_secs``,
@@ -271,20 +328,6 @@ async def speak(
         ``waited_for_turn_secs`` to whichever shape applies.
 
     """
-    if when is not None:
-        deadline = 60.0  # armed, returns immediately
-    elif wait_for_turn:
-        # Unbounded on the agent side — it waits for the app bot to fall
-        # silent, and the app bot decides when that is.
-        deadline = 150.0
-    elif wait_for_playout:
-        # Must outlive the agent's playout window (PLAYOUT_TIMEOUT_SECS = 30 s
-        # + PLAYOUT_SECS_PER_WORD = 0.8 s/word in agent.py — mirrored, not
-        # imported: the parent never loads pipecat), so the caller gets the
-        # agent's diagnosis rather than an IPC timeout.
-        deadline = 60.0 + 0.8 * len(text.split())
-    else:
-        deadline = 60.0
     return await send_command(
         "speak",
         text=text,
@@ -292,7 +335,7 @@ async def speak(
         wait_for_turn=wait_for_turn,
         when=when,
         timer_secs=timer_secs,
-        deadline=deadline,
+        deadline=_speak_deadline(text, wait_for_playout, wait_for_turn, when),
     )
 
 
@@ -325,21 +368,21 @@ async def stop() -> dict:
             keys: ``session`` (span + ``biases`` to read the numbers correctly),
             ``turns`` (transcript per turn; app-bot turns carry
             ``response_latency_secs``), ``app_response_latencies_secs``,
-            ``talk_over_windows``, ``dead_air_gaps``, ``talk_time``,
-            ``utterances``, ``summary``.
+            ``talk_over_windows``, ``dead_air_gaps``,
+            ``tester_think_time_gaps`` (silence owed by the DRIVING agent, not
+            the app — read it alongside ``dead_air_gaps``), ``outage_gaps``
+            (silence spanning a disconnect; quarantined from the
+            conversational numbers), ``talk_time``, ``utterances``,
+            ``summary``.
           * ``merged_wav`` / ``tester_wav`` / ``app_bot_wav`` — recordings, if
             audio was captured.
+          * ``debug_log`` — ``agent-debug.log``, the per-session DEBUG sink
+            (``voicebox.timing`` lines live here).
 
     """
     artifacts = None
     try:
-        # Must outlive the agent's STT drain (DRAIN_CAP_SECS = 180 in
-        # processors/nonblocking_whisper_stt.py — not imported here so the
-        # parent never loads pipecat) plus settle + artifact writing. At the
-        # old 30 s this timed out mid-drain and the reap below killed the
-        # child BEFORE it wrote events.json/metrics.json — verification
-        # round 4 lost its entire artifact set that way.
-        response = await send_command("stop", deadline=210.0)
+        response = await send_command("stop", deadline=STOP_DEADLINE_SECS)
         artifacts = response.get("artifacts")
     except Exception as e:
         # A hung/dead child still gets reaped below — that's a stop too.

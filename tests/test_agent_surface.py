@@ -183,6 +183,36 @@ def test_whisper_model_is_wrapped_eager(monkeypatch: pytest.MonkeyPatch):
     assert isinstance(service._model, EagerSegmentsWhisperModel)
 
 
+async def test_playout_ignores_prior_utterances_frames(monkeypatch: pytest.MonkeyPatch):
+    # Review finding (post round 7): the observer forwards every TTS/playout
+    # frame to whatever _Playout exists, so an unwaited speak still in flight
+    # when a waited speak installs its tracker used to resolve the waited one
+    # with the PRIOR utterance's playout end (played: true before a single
+    # sample of the waited text played). One speak() = one TTSStoppedFrame
+    # (D17), so the tracker counts and skips the pending ones.
+    from pipecat.frames.frames import BotStoppedSpeakingFrame, TTSStoppedFrame
+
+    monkeypatch.setattr(agent_module, "PLAYOUT_TIMEOUT_SECS", 5.0)
+    agent = _agent_ready_to_speak()
+
+    await agent.speak("utterance A, unwaited, still synthesizing")  # pending -> 1
+    waited = asyncio.create_task(agent.speak("utterance B", wait_for_playout=True))
+    await asyncio.sleep(0.05)  # let B install its _Playout (skip=1)
+
+    # A finishes: its TTSStopped + playout end must NOT resolve B.
+    await agent._on_pipeline_frame(TTSStoppedFrame())
+    await agent._on_pipeline_frame(BotStoppedSpeakingFrame())
+    await asyncio.sleep(0.05)
+    assert not waited.done()
+
+    # B's own synthesis end + playout end resolve it.
+    await agent._on_pipeline_frame(TTSStoppedFrame())
+    await agent._on_pipeline_frame(BotStoppedSpeakingFrame())
+    result = await waited
+
+    assert result["played"] is True and result["interrupted"] is False
+
+
 async def test_wait_for_turn_reports_wait_duration():
     # Round 1 ergonomics: wait_for_turn=True returned a bare {queued: true},
     # indistinguishable from the ungated path. The result must say how long
@@ -221,8 +251,12 @@ def test_turn_stop_timeout_outlives_batch_stt():
     # stamped at arrival time (turn_started_at lied by 25-34 s live).
     from pipecat.processors.aggregators.llm_context import LLMContext
 
+    from voicebox.processors.nonblocking_whisper_stt import DRAIN_CAP_SECS
+
     agent = PipecatMCPAgent(transport=None)  # type: ignore[arg-type]
     user_aggregator, _ = agent._create_context_aggregators(LLMContext())
 
     assert user_aggregator._params.user_turn_stop_timeout == agent_module.TURN_STOP_TIMEOUT_SECS
-    assert agent_module.TURN_STOP_TIMEOUT_SECS >= 60.0
+    # Must outlive the drain cap: any decode stop() would wait for must also
+    # beat the watchdog, or the turn closes empty mid-drain (round 4).
+    assert agent_module.TURN_STOP_TIMEOUT_SECS > DRAIN_CAP_SECS

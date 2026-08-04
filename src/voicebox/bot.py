@@ -28,16 +28,21 @@ from voicebox.agent_ipc import read_request, send_response
 async def bot(runner_args: RunnerArguments):
     """Start the Pipecat agent and run the command loop.
 
-    Supported commands (all requests/responses carry a correlation ``id``):
+    Supported commands (all requests/responses carry a correlation ``id``;
+    the response shapes are ``PipecatMCPAgent``'s — see its docstrings):
         listen: Wait for conversation events past ``cursor``, respond with
-            ``{"events": [...], "cursor": <next>}`` (empty events on timeout).
-        speak:  Speak the provided text; with ``wait_for_playout`` respond after
-            playout with ``{"queued", "started_at", "finished_at", "interrupted"}``,
-            otherwise respond ``{"queued": True}`` immediately. Supports
-            ``wait_for_turn`` (speak once the app bot is silent) and a one-shot
-            ``when``/``timer_secs`` barge-in trigger (responds ``{"armed": True}``).
+            ``{"events": [...], "cursor": <next>, "transcription_lag_secs"}``
+            (empty events on timeout).
+        speak:  Speak the provided text; with ``wait_for_playout`` respond
+            after playout with ``{"queued", "played", "started_at",
+            "finished_at", "interrupted"}`` (or ``{"queued", "played": False,
+            "reason"}`` on window expiry), otherwise respond
+            ``{"queued": True}`` immediately. ``wait_for_turn`` (speak once
+            the app bot is silent) adds ``waited_for_turn_secs``; a one-shot
+            ``when``/``timer_secs`` barge-in trigger responds
+            ``{"armed": True}``.
         stop:   Cancel in-flight commands, stop the agent and exit the loop,
-            respond with ``{"ok": True}``.
+            respond with ``{"ok": True, "artifacts": <paths or None>}``.
 
     Failures respond on the ``error`` key and the loop keeps serving commands.
     """
