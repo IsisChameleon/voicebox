@@ -58,7 +58,10 @@ local_scheme = "no-local-version"
 fallback_version = "0.0.0-dev"
 
 [tool.ruff]
-exclude = [".git"]
+# docs/artefacts holds one-off probe/bench scripts captured as evidence
+# (see CLAUDE.md's branch-discipline conventions) — proof transcripts, not
+# maintained source, so they're out of scope for style/docstring rules.
+exclude = [".git", "docs/artefacts"]
 line-length = 100
 
 [tool.ruff.lint]
