@@ -22,7 +22,7 @@ from pipecat.frames.frames import (
     TTSStoppedFrame,
 )
 from pipecat.services.settings import TTSSettings
-from pipecat.services.tts_service import TTSService
+from pipecat.services.tts_service import TextAggregationMode, TTSService
 from pipecat.transcriptions.language import Language, resolve_language
 from pipecat.utils.tracing.service_decorators import traced_tts
 from pydantic import BaseModel
@@ -124,8 +124,19 @@ class KokoroTTSService(TTSService):
         # 1.3.0 validates that store-mode settings have no NOT_GIVEN fields:
         # supply model/voice/language (model=None — Kokoro loads a local file,
         # it has no model-name concept).
+        #
+        # TOKEN aggregation: the default SENTENCE mode splits a multi-sentence
+        # speak() into one run_tts call PER SENTENCE, and any sentence whose
+        # synthesis lags the previous one's playout becomes real silence in the
+        # synthetic mic — round 6 measured gaps up to 11.5 s, the app answered
+        # the first fragment, and wait_for_playout resolved at the first
+        # sentence's TTSStoppedFrame. voicebox queues exactly ONE LLMTextFrame
+        # per speak() (agent._queue_speak_frames), so TOKEN mode hands the
+        # whole utterance to one run_tts call, whose buffering (Task G) then
+        # covers it end to end: one gap-free span, one TTSStarted/Stopped pair.
         super().__init__(
             settings=TTSSettings(model=None, voice=voice_id, language=params.language),
+            text_aggregation_mode=TextAggregationMode.TOKEN,
             **kwargs,
         )
 
@@ -144,6 +155,21 @@ class KokoroTTSService(TTSService):
     def can_generate_metrics(self) -> bool:
         """Indicate that this service supports TTFB and usage metrics."""
         return True
+
+    async def warm_up(self):
+        """Run one throwaway synthesis so the first real one isn't cold.
+
+        The session's first ONNX inference carries ~5 s of one-time cost.
+        Verification round 5 saw it land between two sentences of the first
+        ``speak()``: sentence one played, the mic went silent for 5.3 s while
+        sentence two warmed the model, and the app under test took the turn
+        mid-utterance. Discarding one tiny synthesis at startup moves that
+        cost off the conversation.
+        """
+        stream = self._kokoro.create_stream("Ready.", voice=self._voice_id, lang=self._lang_code)
+        async for _samples, _sample_rate in stream:
+            pass
+        logger.debug(f"{self}: warm-up synthesis complete")
 
     @traced_tts
     async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
@@ -168,14 +194,22 @@ class KokoroTTSService(TTSService):
                 text, voice=self._voice_id, lang=self._lang_code, speed=1.0
             )
 
+            # Buffer the WHOLE utterance before yielding any audio (Task G).
+            # Yielding per chunk turned the CPU synthesis gap between chunks
+            # into real silence in the synthetic microphone (1.6-4.2 s
+            # observed), and the app under test heard one utterance as several
+            # user turns — once badly enough that it took the turn mid-sentence
+            # and scolded the tester. Nobody is waiting on time-to-first-byte
+            # from a synthetic user; gap-free playout is the entire point.
+            chunks: list[bytes] = []
             async for samples, sample_rate in stream:
-                await self.stop_ttfb_metrics()
-
                 audio_int16 = (samples * 32767).astype(np.int16).tobytes()
-                audio_data = await self._resampler.resample(
-                    audio_int16, sample_rate, self.sample_rate
+                chunks.append(
+                    await self._resampler.resample(audio_int16, sample_rate, self.sample_rate)
                 )
+            await self.stop_ttfb_metrics()
 
+            for audio_data in chunks:
                 yield TTSAudioRawFrame(
                     audio=audio_data, sample_rate=self.sample_rate, num_channels=1
                 )

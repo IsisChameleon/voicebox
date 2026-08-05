@@ -1,0 +1,65 @@
+[
+  {
+    "type": "session_started",
+    "t": 1785204652.327637,
+    "vad_stop_secs": 1.0,
+    "note": "app_bot_speech_stopped.t lands ~vad_stop_secs after true speech end; app_bot_transcript arrives later still (batch STT)"
+  },
+  {
+    "type": "client_connected",
+    "t": 1785204653.1879907
+  },
+  {
+    "type": "app_bot_speech_started",
+    "t": 1785204765.1351342
+  },
+  {
+    "type": "app_bot_speech_stopped",
+    "t": 1785204773.1692016
+  },
+  {
+    "type": "app_bot_transcript",
+    "t": 1785204800.476813,
+    "text": "I'm so glad you're here.  We're about to go on an exciting reading adventure together.  Let me load up your book and see what's waiting for you.",
+    "turn_started_at": "2026-07-28T02:13:20.287+00:00"
+  },
+  {
+    "type": "app_bot_speech_started",
+    "t": 1785204800.962413
+  },
+  {
+    "type": "app_bot_speech_stopped",
+    "t": 1785204806.0708141
+  },
+  {
+    "type": "app_bot_transcript",
+    "t": 1785204838.2552166,
+    "text": "Thank you.",
+    "turn_started_at": "2026-07-28T02:13:58.253+00:00"
+  },
+  {
+    "type": "tester_transcript",
+    "t": 1785204870.062517,
+    "text": "Can you switch to the next chapter please?"
+  },
+  {
+    "type": "tester_speech_started",
+    "t": 1785204872.6469338
+  },
+  {
+    "type": "tester_speech_stopped",
+    "t": 1785204874.4895856
+  },
+  {
+    "type": "app_bot_speech_started",
+    "t": 1785204878.2438169
+  },
+  {
+    "type": "app_bot_speech_stopped",
+    "t": 1785204923.0058284
+  },
+  {
+    "type": "session_stopped",
+    "t": 1785204982.7608006
+  }
+]

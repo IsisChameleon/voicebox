@@ -22,6 +22,9 @@ lives.
 
 import asyncio
 import sys
+import time
+from collections import deque
+from datetime import datetime, timezone
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -38,6 +41,7 @@ from pipecat.frames.frames import (
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMTextFrame,
+    TTSStoppedFrame,
     VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
@@ -50,7 +54,8 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregatorParams,
     UserTurnStoppedMessage,
 )
-from pipecat.processors.frame_processor import FrameDirection
+from pipecat.processors.audio.vad_processor import VADProcessor
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.services.stt_service import STTService
 from pipecat.services.tts_service import TTSService
@@ -66,6 +71,7 @@ from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 
+from voicebox.artifacts import existing_artifact_path
 from voicebox.events import (
     EventType,
     SessionStartedEvent,
@@ -77,8 +83,13 @@ from voicebox.events import (
 )
 from voicebox.metrics import compute_metrics
 from voicebox.processors.kokoro_tts import KokoroTTSService
+from voicebox.processors.nonblocking_whisper_stt import (
+    EagerSegmentsWhisperModel,
+    NonBlockingSegmentedSTT,
+)
 from voicebox.raw_pcm_serializer import RawPCMSerializer
 from voicebox.runner_args import BrowserShimRunnerArguments
+from voicebox.timing import TimedSTTMixin, TimedTurnAnalyzerMixin, log_duration
 
 load_dotenv(override=True)
 
@@ -88,15 +99,72 @@ load_dotenv(override=True)
 # consumers can subtract it.
 VAD_STOP_SECS = 1.0
 
-# Max seconds speak(wait_for_playout=True) waits for our audio to finish playing out.
-PLAYOUT_TIMEOUT_SECS = 120.0
+# Max seconds speak(wait_for_playout=True) waits for our audio to finish playing
+# out. Short on purpose: expiry is now a diagnosis handed back to the caller
+# (played=False plus a reason), not an exception, so waiting minutes to raise
+# something uninformative buys nothing.
+PLAYOUT_TIMEOUT_SECS = 30.0
 
-# Kokoro's playout reaches the transport in segments separated by sub-second
-# gaps, so pipecat emits a BotStarted/StoppedSpeakingFrame PAIR per segment.
-# speak(wait_for_playout=True) treats the playout as finished only after the bot has stayed
-# silent this long, so the reported span covers the whole utterance instead of
-# clipping at the first segment.
-PLAYOUT_SETTLE_SECS = 1.0
+# Per-word extension of the playout window. TOKEN aggregation (D17) synthesizes
+# the whole utterance before any audio plays, so time-to-playout-end is roughly
+# 2x the audio duration under STT CPU contention (round 7: a healthy 61-word
+# speak hit playout end 36.2 s after queueing — past a flat 30 s window).
+# Kokoro af_heart measures ~0.3 s of audio per word; 0.8 s/word budgets ~2x
+# that on top of the base. Mirrored (not imported) in server.py's IPC deadline,
+# which must outlive this window (D15).
+PLAYOUT_SECS_PER_WORD = 0.8
+
+# How long the aggregator's watchdog lets a user turn sit stopped-but-textless
+# before force-closing it. pipecat's 5 s default assumes streaming STT, where a
+# transcript trails speech by well under a second. Ours is batch Whisper on
+# CPU, and under load the decode approaches ~1x realtime (round 4 measured a
+# 116 s narration decoding for 108 s) — every time the watchdog fires first,
+# the turn closes empty and the late transcript re-emits as an orphan event
+# stamped at arrival time (rounds 1 and 4 both hit this). 240 s outlives the
+# 180 s drain cap, i.e. any decode the session would wait for at all; a
+# genuinely transcript-less turn still closes, just later.
+TURN_STOP_TIMEOUT_SECS = 240.0
+
+
+# The STT services are composed from two mixins, in this order:
+#   NonBlockingSegmentedSTT — transcribes on a worker, off the frame task.
+#   TimedSTTMixin           — Phase 0 instrumentation: brackets the wrapped
+#                             call with a clock read so a DEBUG session log
+#                             attributes per-turn lag to a named call.
+# Timing therefore measures the real transcription where it now runs, inside
+# the worker. Neither mixin vendors pipecat code; see timing.py and
+# processors/nonblocking_whisper_stt.py.
+#
+# Both classes carry `# type: ignore[misc]`: each Whisper service re-declares
+# `_settings` with its own nested Settings type, which pyright reads as
+# conflicting with the STTService declaration that reaches the class through
+# NonBlockingSegmentedSTT. The MRO resolves it to the concrete service's at
+# runtime; nothing here changes that.
+class _NonBlockingWhisperSTTService(  # type: ignore[misc]
+    NonBlockingSegmentedSTT, TimedSTTMixin, WhisperSTTService
+):
+    """faster-whisper STT, transcribing off the frame task, timed at DEBUG."""
+
+    def _load(self):
+        """Load the model, then make its lazy decode eager (in-thread).
+
+        Without the wrap, faster-whisper's decode escapes pipecat's
+        ``asyncio.to_thread`` and freezes the event loop for the duration
+        (measured 21 s on a 40 s utterance) — see ``EagerSegmentsWhisperModel``.
+        """
+        super()._load()
+        if self._model is not None:
+            self._model = EagerSegmentsWhisperModel(self._model)  # type: ignore[assignment]
+
+
+class _NonBlockingWhisperSTTServiceMLX(  # type: ignore[misc]
+    NonBlockingSegmentedSTT, TimedSTTMixin, WhisperSTTServiceMLX
+):
+    """MLX Whisper STT, transcribing off the frame task, timed at DEBUG."""
+
+
+class _TimedSmartTurnAnalyzer(TimedTurnAnalyzerMixin, LocalSmartTurnAnalyzerV3):
+    """Smart-turn v3 analyzer with ``analyze_end_of_turn`` timed at DEBUG."""
 
 
 class _PipelineEventObserver(BaseObserver):
@@ -114,6 +182,7 @@ class _PipelineEventObserver(BaseObserver):
         BotStartedSpeakingFrame,
         BotStoppedSpeakingFrame,
         InterruptionFrame,
+        TTSStoppedFrame,
     )
 
     def __init__(self, agent: "PipecatMCPAgent"):
@@ -138,35 +207,49 @@ class _Playout:
 
     The tester's BotStarted/StoppedSpeakingFrame carry no utterance identity,
     so only one waited speak is tracked at a time (guarded by a lock in
-    ``speak``). Because the playout arrives in segments, the future resolves
-    only after the bot has been silent for ``settle_secs`` (so the span covers
-    the whole utterance), reporting first-start to last-stop; an interruption
-    resolves it immediately.
+    ``speak``), and utterances queued BEFORE this one (an unwaited speak, an
+    armed barge-in) are told apart by count: TOKEN aggregation (D17) makes one
+    ``speak()`` exactly one ``TTSStoppedFrame``, so ``skip_tts_stops`` — the
+    number of utterances still owing one at install time — says how many to
+    ignore before the next one is ours. Kokoro hands the transport the whole
+    utterance as one gap-free span (Task G), so the playout is over at the
+    first ``BotStoppedSpeakingFrame`` that follows OUR ``TTSStoppedFrame`` —
+    no silence timer. An interruption resolves it immediately (it kills all
+    queued audio, ours included).
     """
 
-    def __init__(self, settle_secs: float):
+    def __init__(self, skip_tts_stops: int = 0):
         self._loop = asyncio.get_event_loop()
-        self._settle_secs = settle_secs
         self.future: asyncio.Future[dict] = self._loop.create_future()
         self.started_at: Optional[float] = None
         self._last_stopped_at: Optional[float] = None
         self.interrupted: bool = False
-        self._settle_timer: Optional[asyncio.TimerHandle] = None
+        self._tts_finished: bool = False
+        self._skip_tts_stops: int = skip_tts_stops
 
     def on_started(self, t: float):
-        """Record the first segment's start and cancel any pending resolve."""
+        """Record the playout's first audio start."""
         if self.started_at is None:
             self.started_at = t
-        if self._settle_timer is not None:
-            self._settle_timer.cancel()
-            self._settle_timer = None
+
+    def on_tts_stopped(self):
+        """Mark the utterance fully synthesized and handed to the transport.
+
+        The first ``skip_tts_stops`` calls belong to utterances queued before
+        ours and are ignored. ``TTSStoppedFrame`` travels ahead of the buffered
+        audio's playout, so once ours arrives the next
+        ``BotStoppedSpeakingFrame`` is the audio actually ending.
+        """
+        if self._skip_tts_stops > 0:
+            self._skip_tts_stops -= 1
+            return
+        self._tts_finished = True
 
     def on_stopped(self, t: float):
-        """Record a segment end and (re)arm the settle timer to resolve on silence."""
+        """Record an audio-span end; resolve if the utterance was complete."""
         self._last_stopped_at = t
-        if self._settle_timer is not None:
-            self._settle_timer.cancel()
-        self._settle_timer = self._loop.call_later(self._settle_secs, self._resolve)
+        if self._tts_finished:
+            self._resolve()
 
     def on_interrupted(self, t: float):
         """Barge-in cut the playout short — resolve immediately."""
@@ -177,9 +260,6 @@ class _Playout:
 
     def _resolve(self):
         """Resolve the future with the observed playout span (first → last)."""
-        if self._settle_timer is not None:
-            self._settle_timer.cancel()
-            self._settle_timer = None
         if not self.future.done():
             self.future.set_result(
                 {
@@ -207,6 +287,8 @@ class PipecatMCPAgent:
         self._transport = transport
         self._record_dir = record_dir
         self._audio_buffer = None  # type: ignore[assignment]
+        # Set in start(); listen_events()/speak() start the agent before reading it.
+        self._stt: NonBlockingSegmentedSTT = None  # type: ignore[assignment]
 
         self._task: Optional[asyncio.Task] = None
         self._pipeline_task: Optional[PipelineWorker] = None
@@ -221,14 +303,49 @@ class PipecatMCPAgent:
         # In-flight speak(wait_for_playout=True) playout tracking — one at a time.
         self._playout: Optional[_Playout] = None
         self._playout_lock = asyncio.Lock()
+        # Utterances queued to TTS that have not yet emitted their
+        # TTSStoppedFrame (one each, by D17's TOKEN invariant). A _Playout
+        # installed while this is non-zero must skip that many stops or a
+        # prior utterance's playout end resolves it early.
+        self._tts_pending: int = 0
+        # Strong refs to fire-and-forget tasks (warm-up, recording start) so
+        # the loop cannot GC them mid-flight; exceptions get logged.
+        self._background_tasks: set[asyncio.Task] = set()
 
         # Whether the app bot is currently speaking, toggled by the VAD frames.
         # Lets speak(wait_for_turn=True) block until the bot falls silent.
         self._app_bot_speaking: bool = False
+        # VAD start times of app-bot speech not yet claimed by a transcript.
+        # Transcripts arrive in segment order (single STT worker), so each one
+        # claims the earliest unclaimed start — same arrival-ordered rule as
+        # metrics._match_app_transcripts, same D2 bias (a segment Whisper
+        # returns nothing for shifts later claims by one interval).
+        self._unclaimed_bot_speech_starts: deque[float] = deque()
         # Background tasks armed by speak(when=...); cancelled on stop().
         self._armed_tasks: set[asyncio.Task] = set()
 
         self._started = False
+
+    def _spawn_task(self, coro, name: str, registry: Optional[set] = None) -> asyncio.Task:
+        """Create a task, hold a strong ref, and log (not swallow) its failure.
+
+        The loop keeps only weak refs to tasks, so an un-referenced
+        fire-and-forget task can be GC'd mid-flight, and its exception would
+        surface only as "Task exception was never retrieved" at GC time — an
+        armed barge-in that died after arming would be indistinguishable from
+        a trigger that never fired.
+        """
+        task = asyncio.create_task(coro)
+        tracked = self._background_tasks if registry is None else registry
+        tracked.add(task)
+
+        def _done(t: asyncio.Task):
+            tracked.discard(t)
+            if not t.cancelled() and t.exception() is not None:
+                logger.warning(f"background task '{name}' failed: {t.exception()!r}")
+
+        task.add_done_callback(_done)
+        return task
 
     async def _emit(self, event: VoiceboxEvent):
         """Append an event to the log and wake any pending listen_events()."""
@@ -236,6 +353,38 @@ class PipecatMCPAgent:
             self._events.append(event)
             self._event_cond.notify_all()
         logger.debug(f"event: {event.type} @ {event.t:.3f}")
+
+    async def _emit_app_bot_transcript(self, text: str, aggregator_turn_started_at: str):
+        """Emit a transcript, stamping the turn start from our own VAD log.
+
+        The aggregator's ``UserTurnStoppedMessage.timestamp`` is only right
+        when the turn was VAD-started. Under batch STT a monologue's later
+        chunks VAD-start while the previous chunk's transcript is still in
+        Whisper, so their turns are (re)opened by the transcript's own arrival
+        and the aggregator stamps *arrival* time — observed live off by up to
+        103 s. Our observer logs every VAD start; the earliest unclaimed one
+        is this transcript's true turn start.
+
+        Args:
+            text: The transcribed utterance.
+            aggregator_turn_started_at: pipecat's ISO stamp, used only when no
+                unclaimed VAD start exists (should not happen in practice).
+
+        """
+        if self._unclaimed_bot_speech_starts:
+            started = self._unclaimed_bot_speech_starts.popleft()
+            turn_started_at = datetime.fromtimestamp(started, tz=timezone.utc).isoformat(
+                timespec="milliseconds"
+            )
+        else:
+            turn_started_at = aggregator_turn_started_at
+        await self._emit(
+            TranscriptEvent(
+                text=text,
+                turn_started_at=turn_started_at,
+                transcription_empty=not text,
+            )
+        )
 
     async def _on_pipeline_frame(self, frame: Frame):
         """Translate an observed pipeline frame into a log event.
@@ -247,6 +396,7 @@ class PipecatMCPAgent:
         """
         if isinstance(frame, VADUserStartedSpeakingFrame):
             self._app_bot_speaking = True
+            self._unclaimed_bot_speech_starts.append(frame.timestamp)
             await self._emit(
                 VoiceboxEvent(type=EventType.APP_BOT_SPEECH_STARTED, t=frame.timestamp)
             )
@@ -266,10 +416,19 @@ class PipecatMCPAgent:
                 self._playout.on_stopped(event.t)
             await self._emit(event)
         elif isinstance(frame, InterruptionFrame):
+            # An interruption wipes the pipeline's queued audio, so utterances
+            # still owing a TTSStoppedFrame will never emit one.
+            self._tts_pending = 0
             event = VoiceboxEvent(type=EventType.TESTER_SPEECH_INTERRUPTED)
             if self._playout is not None:
                 self._playout.on_interrupted(event.t)
             await self._emit(event)
+        elif isinstance(frame, TTSStoppedFrame):
+            # No event: this is _Playout bookkeeping (the utterance is fully
+            # synthesized), not something a listen() caller needs to see.
+            self._tts_pending = max(0, self._tts_pending - 1)
+            if self._playout is not None:
+                self._playout.on_tts_stopped()
 
     async def start(self):
         """Build the pipeline and run it in the background until ``stop()``."""
@@ -278,33 +437,34 @@ class PipecatMCPAgent:
 
         logger.info("Starting Pipecat MCP Agent pipeline...")
 
-        stt = self._create_stt_service()
+        # A per-session DEBUG log next to the other artifacts, so the
+        # `voicebox.timing` lines (Task C) survive the session — the child's
+        # stderr goes to whatever terminal launched the server and is lost to
+        # any later analysis. This is how a transcript-lag report gets
+        # attributed to a named call instead of guessed at.
+        if self._record_dir:
+            import os
+
+            os.makedirs(self._record_dir, exist_ok=True)
+            logger.add(
+                os.path.join(self._record_dir, "agent-debug.log"),
+                level="DEBUG",
+                mode="w",
+            )
+
+        stt = self._stt = self._create_stt_service()
         tts = self._create_tts_service()
+        vad = self._create_vad_processor()
+
+        # Fire-and-forget: warms Kokoro's ONNX session so the session's first
+        # speak() isn't split by ~5 s of one-time inference cost (round 5).
+        # Runs concurrently with the browser child's own startup; a speak()
+        # arriving first just queues behind it on the executor, no worse than
+        # the cold path it replaces.
+        self._spawn_task(tts.warm_up(), "kokoro_warm_up")
 
         context = LLMContext()
-        user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
-            context,
-            user_params=LLMUserAggregatorParams(
-                user_turn_strategies=UserTurnStrategies(
-                    # The "user" of this pipeline is the REMOTE BOT (its audio
-                    # is our input). The default start strategies ship with
-                    # enable_interruptions=True, which cancels our in-flight
-                    # Kokoro TTS the moment the bot makes a sound — a synthetic
-                    # human must be able to keep talking (and talk over the bot).
-                    start=[
-                        VADUserTurnStartStrategy(enable_interruptions=False),
-                        TranscriptionUserTurnStartStrategy(enable_interruptions=False),
-                    ],
-                    stop=[
-                        TurnAnalyzerUserTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3())
-                    ],
-                ),
-                # 1.0s captures complete utterances over WebRTC with natural
-                # pauses; 0.2s (pipecat's default for clean TTS sources) chops
-                # remote speech mid-sentence and produces single-word transcripts.
-                vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=VAD_STOP_SECS)),
-            ),
-        )
+        user_aggregator, assistant_aggregator = self._create_context_aggregators(context)
 
         if self._record_dir:
             from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
@@ -315,21 +475,9 @@ class PipecatMCPAgent:
                 buffer_size=0,  # accumulate everything
             )
 
-        stages = [
-            self._transport.input(),
-            stt,
-            user_aggregator,
-            tts,
-            assistant_aggregator,
-            self._transport.output(),
-        ]
-        # AudioBufferProcessor at the END catches both InputAudioRawFrame
-        # (from transport.input downstream) and OutputAudioRawFrame (TTS →
-        # transport.output) as they continue past the output — neither is
-        # destructively consumed by transport.output.
-        if self._audio_buffer:
-            stages.append(self._audio_buffer)
-        pipeline = Pipeline(stages)
+        pipeline = Pipeline(
+            self._build_stages(vad, stt, user_aggregator, tts, assistant_aggregator)
+        )
 
         # enable_rtvi=False: we are a headless synthetic user, not an RTVI
         # client. Conversation events reach Claude via listen_events()'s
@@ -356,13 +504,11 @@ class PipecatMCPAgent:
 
         @user_aggregator.event_handler("on_user_turn_stopped")
         async def on_user_turn_stopped(aggregator, strategy, message: UserTurnStoppedMessage):
-            if message.content:
-                # message.timestamp is the ISO wall-clock at which the app
-                # bot's turn STARTED; the event's t is when the batch
-                # transcript became ready.
-                await self._emit(
-                    TranscriptEvent(text=message.content, turn_started_at=message.timestamp)
-                )
+            with log_duration("on_user_turn_stopped"):
+                # Emitted even when Whisper recovered nothing (Task F): an
+                # empty-flagged event tells a reader "we tried and got
+                # nothing", where silence would read as "the bot never spoke".
+                await self._emit_app_bot_transcript(message.content or "", message.timestamp)
 
         # Log header: consumers of app_bot_speech_stopped timings need the
         # built-in VAD lag to subtract it.
@@ -389,7 +535,7 @@ class PipecatMCPAgent:
                 await self._audio_buffer.start_recording()
                 logger.info("Audio recording started")
 
-            asyncio.create_task(_start_recording())
+            self._spawn_task(_start_recording(), "start_recording")
 
         self._started = True
         logger.info("Pipecat MCP Agent started!")
@@ -399,8 +545,10 @@ class PipecatMCPAgent:
 
         Returns:
             A dict of absolute artifact paths when ``record_dir`` is set
-            (``{events, metrics, merged_wav, tester_wav, app_bot_wav}``), else
-            ``None``. ``*_wav`` keys are present only when audio was recorded.
+            (``{events, metrics, merged_wav, tester_wav, app_bot_wav,
+            debug_log}``), else ``None``. ``*_wav`` keys are present only when
+            audio was recorded; ``debug_log`` only when the per-session DEBUG
+            sink wrote anything.
 
         """
         if not self._started:
@@ -417,6 +565,18 @@ class PipecatMCPAgent:
         for task in self._armed_tasks:
             task.cancel()
         await asyncio.gather(*self._armed_tasks, return_exceptions=True)
+
+        # Drain the STT before writing artifacts (Task F): a transcription
+        # still in flight here used to be cancelled with the pipeline, losing
+        # its text from events.json — a 44.8 s turn in the field report, four
+        # turns (~100 s) in verification round 3. The budget scales with the
+        # backlog (round 3 measured 140 s against the spec's ~15 s guess) and
+        # is capped so a wedged Whisper cannot hang teardown.
+        if self._stt is not None:
+            budget = self._stt.drain_budget_secs()
+            if not await self._stt.drain(timeout=budget):
+                logger.warning(f"STT drain incomplete after {budget:.1f}s; artifacts may be short")
+            await self._settle_event_log()
 
         # Flush artifacts BEFORE EndFrame propagates — the audio buffer
         # processor is closed after EndFrame.
@@ -436,6 +596,21 @@ class PipecatMCPAgent:
         self._started = False
         logger.info("Pipecat MCP Agent stopped")
         return artifacts
+
+    async def _settle_event_log(self, max_wait: float = 2.0) -> None:
+        """Wait until the event log stops growing (bounded).
+
+        A drained STT queue means Whisper finished, not that the transcript
+        events landed: the frames still hop STT → aggregator → handler, each
+        on its own task. Polls until one quiet interval or ``max_wait``.
+        """
+        deadline = asyncio.get_event_loop().time() + max_wait
+        count = len(self._events)
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.25)
+            if len(self._events) == count:
+                return
+            count = len(self._events)
 
     async def _dump_artifacts(self, record_dir: str) -> dict:
         """Write the per-session artifacts into ``record_dir``.
@@ -503,11 +678,22 @@ class PipecatMCPAgent:
             artifacts["tester_wav"] = write_wav("kokoro_voice.wav", tester_audio, 1)
             artifacts["merged_wav"] = write_wav("merged.wav", merged, 2)
 
+        debug_log = existing_artifact_path(record_dir, "agent-debug.log")
+        if debug_log is not None:
+            artifacts["debug_log"] = debug_log
+
         logger.info(f"wrote artifacts to {self._record_dir}: {sorted(artifacts)}")
         return artifacts
 
     async def listen_events(self, timeout: float, cursor: int = 0) -> dict:
         """Return the events past ``cursor``, blocking until at least one exists.
+
+        The returned batch is sorted by ``t`` (stable: equal-``t`` events keep
+        append order), but the cursor tracks APPEND order — the sort cannot
+        reach across a cursor boundary, so an event whose ``t`` predates a
+        batch you already read still arrives in a later batch. Notably,
+        ``tester_transcript.t`` is stamped at ``speak()`` call time (the
+        ground-truth input, not an STT or playout measurement).
 
         Args:
             timeout: Max seconds to wait for a new event past the cursor.
@@ -517,7 +703,11 @@ class PipecatMCPAgent:
                 or re-reading events. ``0`` replays the whole session.
 
         Returns:
-            ``{"events": [...], "cursor": <next cursor>}``.
+            ``{"events": [...], "cursor": <next cursor>, "transcription_lag_secs": <float>}``.
+            The lag is the age of the oldest audio segment still queued for
+            Whisper — non-zero means "a transcript is coming". The converse
+            does NOT hold: decoded text held by the aggregator's still-open
+            turn reads 0.0 (D11/D14), so 0.0 is not proof nothing is pending.
 
         """
         if not self._started:
@@ -534,7 +724,20 @@ class PipecatMCPAgent:
                 except asyncio.TimeoutError:
                     pass
             events = self._events[cursor:]
-        return {"events": [e.model_dump() for e in events], "cursor": cursor + len(events)}
+        if any(e.type == EventType.APP_BOT_SPEECH_STOPPED for e in events):
+            # The stop event that woke us precedes the STT queuing its segment
+            # by a few event-loop ticks. Sample the lag after they run, or a
+            # caller woken by speech end reads 0.0 at the exact moment a
+            # transcript is guaranteed to be pending.
+            await asyncio.sleep(0.05)
+        return {
+            # Sorted view for the reader; the cursor stays append-order
+            # arithmetic (sorted() is stable, len is unchanged), so paging
+            # never skips or repeats an event.
+            "events": [e.model_dump() for e in sorted(events, key=lambda e: e.t)],
+            "cursor": cursor + len(events),
+            "transcription_lag_secs": round(self._stt.transcription_lag_secs, 3),
+        }
 
     async def speak(
         self,
@@ -561,24 +764,38 @@ class PipecatMCPAgent:
                 audio has finished playing out, reporting the playout span
                 (``started_at`` / ``finished_at`` / ``interrupted``). It says
                 nothing about the app bot — it waits for our Kokoro audio to
-                finish. Ignored when ``when`` is set (the call returns
+                finish. The observation window scales with text length
+                (``PLAYOUT_TIMEOUT_SECS`` + ``PLAYOUT_SECS_PER_WORD`` per
+                word) because the whole utterance is synthesized before any
+                audio plays. Ignored when ``when`` is set (the call returns
                 immediately with ``{"armed": True}``).
             wait_for_turn: When True, block until the app bot is NOT currently
                 speaking, then speak. If already silent, speak immediately. This
-                gates the START of our speech (the polite path).
+                gates the START of our speech (the polite path). The result
+                carries ``waited_for_turn_secs`` — how long the gate actually
+                blocked (0.0 = the bot was already silent).
             when: An ``EventType`` value. When set, arm a ONE-SHOT trigger:
                 return ``{"armed": True}`` immediately, then in the background
                 wait for the NEXT occurrence of that event, sleep
                 ``timer_secs``, and speak ``text`` (canonical barge-in:
-                ``when="app_bot_speech_started", timer_secs=1.5``).
+                ``when="app_bot_speech_started", timer_secs=1.5``). Arming is
+                instantaneous server-side (command receipt → armed event
+                measured at ~1 ms), so arm EARLY — even before a prior
+                utterance finishes; the trigger only reacts to events arriving
+                after the arm, and there is no disarm short of ``stop()``.
+                Audio lands ``timer_secs`` plus TTS synthesis (~3–9 s measured
+                live) after the trigger event.
             timer_secs: Seconds to sleep after the ``when`` event fires before
                 speaking. Only meaningful with ``when``.
 
         Returns:
             ``{"armed": True}`` immediately when ``when`` is set;
             ``{"queued": True}`` when ``wait_for_playout`` is False; otherwise
-            ``{"queued": True, "started_at", "finished_at", "interrupted"}``
-            (wall-clock seconds).
+            ``{"queued": True, "played": True, "started_at", "finished_at",
+            "interrupted"}`` (wall-clock seconds) on an observed playout, or
+            ``{"queued": True, "played": False, "reason": ...}`` when the
+            window expired without one. ``wait_for_turn`` adds
+            ``waited_for_turn_secs`` to whichever shape applies.
 
         Raises:
             ValueError: If both ``when`` and ``wait_for_turn`` are set, or if
@@ -604,15 +821,22 @@ class PipecatMCPAgent:
             # scheduling against the triggering event (and could drop it).
             start = len(self._events)
             await self._emit(TesterBargeInArmedEvent(when=when, timer_secs=timer_secs, text=text))
-            task = asyncio.create_task(self._armed_speak(text, when, timer_secs, start))
-            self._armed_tasks.add(task)
-            task.add_done_callback(self._armed_tasks.discard)
+            self._spawn_task(
+                self._armed_speak(text, when, timer_secs, start),
+                f"armed_speak({when})",
+                registry=self._armed_tasks,
+            )
             return {"armed": True}
 
         await self._connected.wait()
 
+        # Distinguishes the polite path's result from the ungated one (round-1
+        # ergonomics finding): how long the turn gate actually blocked.
+        turn_wait: dict = {}
         if wait_for_turn:
+            wait_started = time.monotonic()
             await self._wait_for_app_bot_silent()
+            turn_wait["waited_for_turn_secs"] = round(time.monotonic() - wait_started, 3)
 
         # Log what we said (ground-truth input, not STT) so the event stream is
         # a complete two-sided transcript.
@@ -620,19 +844,38 @@ class PipecatMCPAgent:
 
         if not wait_for_playout:
             await self._queue_speak_frames(text)
-            return {"queued": True}
+            return {"queued": True, **turn_wait}
 
         # One tracked playout at a time: the tester's speaking frames carry no
         # utterance identity, so overlapping waited speaks could not be told
         # apart.
+        playout_window = round(PLAYOUT_TIMEOUT_SECS + PLAYOUT_SECS_PER_WORD * len(text.split()), 1)
         async with self._playout_lock:
-            self._playout = _Playout(PLAYOUT_SETTLE_SECS)
+            # Utterances already queued (unwaited speaks, a fired barge-in)
+            # each still owe one TTSStoppedFrame; ours is the one after those.
+            self._playout = _Playout(skip_tts_stops=self._tts_pending)
             try:
                 await self._queue_speak_frames(text)
-                result = await asyncio.wait_for(self._playout.future, timeout=PLAYOUT_TIMEOUT_SECS)
+                result = await asyncio.wait_for(self._playout.future, timeout=playout_window)
+            except asyncio.TimeoutError:
+                # The audio was queued; what failed is the evidence that it
+                # played. Raising here told the caller nothing about which half
+                # broke — TTS, transport, or the page's audio graph — so report
+                # it instead and let them read listen() to find out.
+                logger.warning(f"playout not observed within {playout_window}s")
+                return {
+                    "queued": True,
+                    "played": False,
+                    "reason": (
+                        f"no tester_speech_stopped observed within {playout_window}s of "
+                        "queueing; the speech may still play. Check listen() for "
+                        "tester_speech_started and client_connected."
+                    ),
+                    **turn_wait,
+                }
             finally:
                 self._playout = None
-        return {"queued": True, **result}
+        return {"queued": True, "played": True, **result, **turn_wait}
 
     async def _wait_for_app_bot_silent(self):
         """Block until the app bot is not currently speaking."""
@@ -665,6 +908,7 @@ class PipecatMCPAgent:
         """Push the LLM-response frame triplet that drives TTS."""
         if not self._pipeline_task:
             raise RuntimeError("Pipecat MCP Agent not initialized")
+        self._tts_pending += 1
         await self._pipeline_task.queue_frames(
             [
                 LLMFullResponseStartFrame(),
@@ -673,23 +917,105 @@ class PipecatMCPAgent:
             ]
         )
 
-    def _create_stt_service(self) -> STTService:
+    def _create_stt_service(self) -> NonBlockingSegmentedSTT:
+        # Both platforms get the non-blocking worker: the inline await is in
+        # SegmentedSTTService, which both Whisper services inherit, so fixing
+        # one platform would leave the other with the bug and no test able to
+        # see it.
         if sys.platform == "darwin":
-            return WhisperSTTServiceMLX(
+            return _NonBlockingWhisperSTTServiceMLX(
                 settings=WhisperSTTServiceMLX.Settings(model="mlx-community/whisper-large-v3-turbo")
             )
         # device="cpu" is pinned, not left at pipecat's "auto": auto-detect picks CUDA
         # whenever a GPU is visible, and then faster-whisper needs libcublas/libcudnn,
         # which we deliberately don't depend on. CPU keeps the install API-key- and
         # CUDA-free at the cost of slower transcription.
-        return WhisperSTTService(
+        return _NonBlockingWhisperSTTService(
             settings=WhisperSTTService.Settings(model="Systran/faster-distil-whisper-large-v3"),
             device="cpu",
             compute_type="int8",
         )
 
-    def _create_tts_service(self) -> TTSService:
+    def _create_tts_service(self) -> KokoroTTSService:
         return KokoroTTSService(voice_id="af_heart")
+
+    def _create_vad_processor(self) -> VADProcessor:
+        """Build the VAD stage that fronts the STT.
+
+        1.0s captures complete utterances over WebRTC with natural pauses;
+        0.2s (pipecat's default for clean TTS sources) chops remote speech
+        mid-sentence and produces single-word transcripts.
+        """
+        return VADProcessor(
+            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=VAD_STOP_SECS))
+        )
+
+    def _create_context_aggregators(self, context: LLMContext) -> LLMContextAggregatorPair:
+        """Build the user/assistant aggregator pair.
+
+        The pair carries no ``vad_analyzer``: the VAD is a pipeline stage
+        upstream of the STT (see ``_build_stages``), not a parameter of a
+        processor that sits downstream of it.
+        """
+        return LLMContextAggregatorPair(
+            context,
+            user_params=LLMUserAggregatorParams(
+                # Batch Whisper delivers the transcript long after the VAD
+                # stop; at the 5 s default the watchdog force-closed the turn
+                # first (see TURN_STOP_TIMEOUT_SECS).
+                user_turn_stop_timeout=TURN_STOP_TIMEOUT_SECS,
+                user_turn_strategies=UserTurnStrategies(
+                    # The "user" of this pipeline is the REMOTE BOT (its audio
+                    # is our input). The default start strategies ship with
+                    # enable_interruptions=True, which cancels our in-flight
+                    # Kokoro TTS the moment the bot makes a sound — a synthetic
+                    # human must be able to keep talking (and talk over the bot).
+                    start=[
+                        VADUserTurnStartStrategy(enable_interruptions=False),
+                        TranscriptionUserTurnStartStrategy(enable_interruptions=False),
+                    ],
+                    stop=[
+                        TurnAnalyzerUserTurnStopStrategy(turn_analyzer=_TimedSmartTurnAnalyzer())
+                    ],
+                ),
+            ),
+        )
+
+    def _build_stages(
+        self,
+        vad: FrameProcessor,
+        stt: STTService,
+        user_aggregator: FrameProcessor,
+        tts: TTSService,
+        assistant_aggregator: FrameProcessor,
+    ) -> list[FrameProcessor]:
+        """Order the pipeline stages.
+
+        The VAD sits BETWEEN the transport input and the STT, and that order is
+        the whole point: ``SegmentedSTTService`` trims its buffer to the last
+        second on every audio frame that arrives while it believes the user is
+        silent (``pipecat/services/stt_service.py:805-807``). With the VAD
+        downstream, ``VADUserStartedSpeakingFrame`` cannot reach the STT until
+        the audio it describes has already passed through it, so audio that
+        queues during a slow ``run_stt`` is discarded — 85-90 % of it, measured
+        in ``tests/test_vad_placement.py`` and in the triage probes.
+        """
+        stages = [
+            self._transport.input(),
+            vad,
+            stt,
+            user_aggregator,
+            tts,
+            assistant_aggregator,
+            self._transport.output(),
+        ]
+        # AudioBufferProcessor at the END catches both InputAudioRawFrame
+        # (from transport.input downstream) and OutputAudioRawFrame (TTS →
+        # transport.output) as they continue past the output — neither is
+        # destructively consumed by transport.output.
+        if self._audio_buffer:
+            stages.append(self._audio_buffer)
+        return stages
 
 
 async def create_agent(runner_args: RunnerArguments) -> PipecatMCPAgent:

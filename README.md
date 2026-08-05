@@ -81,8 +81,8 @@ Cursor (`~/.cursor/mcp.json`):
 | Tool | Purpose |
 |---|---|
 | `start_browser_session(url, headless?, cdp_port?, audio_port?, user_data_dir?, record_dir?)` | Launch a Playwright Chromium with the audio shim injected, navigate to `url`, expose CDP. The shim hijacks the page's mic (fed by Kokoro) and tees the page's WebRTC remote audio into Whisper. Returns `{cdp_endpoint, audio_ws_url, playwright_mcp_env, attach_hint}`. Drive the UI with any Playwright client that can attach over CDP (see below). Pass `user_data_dir` (a persistent Chrome profile) to reuse an authenticated session: log in once and stay logged in on later runs with the same dir. Pass `record_dir` to have `stop()` write the session artifacts (see below). |
-| `speak(text, wait_for_playout?, wait_for_turn?, when?, timer_secs?)` | Synthesize `text` with Kokoro TTS and stream it into the shim's synthetic mic. Returns `{queued: true}` as soon as frames are queued, not when audio has finished playing. `wait_for_playout` instead returns after our own audio finishes, with `started_at` / `finished_at` / `interrupted`. `wait_for_turn` waits for the app bot to fall silent first (the polite path). `when` / `timer_secs` arm a barge-in trigger and return `{armed: true}` (see below). |
-| `listen(timeout=30, cursor=0)` | Block until at least one event exists past `cursor`, then return `{events, cursor}` covering everything from `cursor` onward. Pass the returned `cursor` to the next call to resume without missing or re-reading anything; `cursor=0` replays the whole session. `events` is empty on timeout. |
+| `speak(text, wait_for_playout?, wait_for_turn?, when?, timer_secs?)` | Synthesize `text` with Kokoro TTS and stream it into the shim's synthetic mic. Returns `{queued: true}` as soon as frames are queued, not when audio has finished playing. `wait_for_playout` instead returns after our own audio finishes, with `played` / `started_at` / `finished_at` / `interrupted` (or `played: false` + `reason` if unobserved within the text-scaled window). `wait_for_turn` waits for the app bot to fall silent first (the polite path) and adds `waited_for_turn_secs`. `when` / `timer_secs` arm a barge-in trigger and return `{armed: true}` (see below). |
+| `listen(timeout=30, cursor=0)` | Block until at least one event exists past `cursor`, then return `{events, cursor, transcription_lag_secs}` covering everything from `cursor` onward (each batch sorted by `t`). Pass the returned `cursor` to the next call to resume without missing or re-reading anything; `cursor=0` replays the whole session. `events` is empty on timeout; a non-zero lag means a transcript is still being decoded. |
 | `stop()` | Tear down the pipecat agent and close the Chromium session. Returns `{stopped: true}`, plus `artifacts` (absolute paths) when the session ran with `record_dir`. |
 
 The IPC between the MCP server and the pipecat child is full-duplex: every command
@@ -161,7 +161,7 @@ so subtract it before quoting any latency number.
 //                          leave its --user-data-dir unset — incompatible with --cdp-endpoint.
 //                          Persist auth via this server's user_data_dir instead.)
 //      your own script:   browser = await playwright.chromium.connect_over_cdp("http://localhost:9222")
-//                         (see scripts/e2e_readme_call.py for a full login→navigate→call driver)
+//                         (see scripts/smoke_browser_shim.py for a connect_over_cdp example)
 
 // 3. speak — the page's WebRTC peer sends OUR Kokoro audio to the bot
 {"name": "speak", "arguments": {"text": "Hi Ember! Tell me about this book."}}
@@ -179,9 +179,6 @@ so subtract it before quoting any latency number.
 //    Playwright, then:
 {"name": "stop", "arguments": {}}
 ```
-
-See `scripts/e2e_readme_call.py` for a complete driver that does
-login → navigate → call → conversation → end against the readme app.
 
 ## Architecture notes
 

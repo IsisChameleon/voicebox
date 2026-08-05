@@ -73,13 +73,18 @@ class SessionStartedEvent(VoiceboxEvent):
 class TranscriptEvent(VoiceboxEvent):
     """A finished app-bot utterance.
 
-    ``turn_started_at`` is pipecat's ISO timestamp for when the bot's turn
-    began; the event's own ``t`` is when the batch transcript became ready.
+    ``turn_started_at`` is the ISO timestamp of the VAD start voicebox
+    observed for this utterance (claimed in arrival order, like the metrics
+    matcher); the event's own ``t`` is when the batch transcript became ready.
+    ``transcription_empty`` is ``True`` when Whisper ran and recovered no
+    text — the utterance happened, its words are unknown; without the flag a
+    reader could not tell that from "the bot never spoke".
     """
 
     type: EventType = EventType.APP_BOT_TRANSCRIPT
     text: str
     turn_started_at: str
+    transcription_empty: bool = False
 
 
 class TesterTranscriptEvent(VoiceboxEvent):
@@ -87,7 +92,9 @@ class TesterTranscriptEvent(VoiceboxEvent):
 
     Unlike ``app_bot_transcript`` (recovered from audio via STT), this is the
     ground-truth input string — exact, and emitted at speak time rather than
-    after batch STT.
+    after batch STT. ``t`` is therefore the ``speak()`` call time by design:
+    NOT when the audio played (see ``tester_speech_started``/``stopped`` for
+    the playout span) and not an STT measurement.
     """
 
     type: EventType = EventType.TESTER_TRANSCRIPT
