@@ -39,10 +39,16 @@ docstring. ``BUILDLOG.md`` D8.
 import asyncio
 import time
 from collections import deque
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 
 from loguru import logger
-from pipecat.frames.frames import CancelFrame, EndFrame, Frame, StartFrame
+from pipecat.frames.frames import (
+    CancelFrame,
+    EndFrame,
+    Frame,
+    StartFrame,
+    TranscriptionFrame,
+)
 from pipecat.services.stt_service import SegmentedSTTService
 
 # Draining at teardown (Task F): the budget scales with the backlog because a
@@ -108,6 +114,13 @@ class NonBlockingSegmentedSTT(SegmentedSTTService):
     def __init__(self, **kwargs):
         """Initialize the queue; the worker starts with the pipeline."""
         super().__init__(**kwargs)
+        # Called once per segment that produced no TranscriptionFrame. Whisper
+        # yields nothing at all for a segment it recovers no text from
+        # (pipecat/services/whisper/stt.py:377, `if text:`), so this worker is
+        # the only place that knows the difference between "we tried and got
+        # nothing" and "the app bot never spoke" — there is no frame for a
+        # reader downstream to see. Set by the agent; None leaves it silent.
+        self.on_empty_segment: Callable[[], Awaitable[None]] | None = None
         self._segments: asyncio.Queue[bytes] = asyncio.Queue()
         # Enqueue times, popped in lockstep with the queue by the single
         # worker. They are what makes the backlog reportable as an age rather
@@ -179,11 +192,27 @@ class NonBlockingSegmentedSTT(SegmentedSTTService):
 
     async def _transcribe_worker(self):
         """Transcribe queued segments one at a time, in the order spoken."""
+        transcripts = 0
+
+        async def counting(source: AsyncGenerator[Frame, None]) -> AsyncGenerator[Frame, None]:
+            """Pass every frame through untouched, counting the transcripts."""
+            nonlocal transcripts
+            async for frame in source:
+                if isinstance(frame, TranscriptionFrame):
+                    transcripts += 1
+                yield frame
+
         while True:
             audio = await self._segments.get()
             self._in_flight_since = self._waiting_since.popleft()
             try:
-                await self.process_generator(super().run_stt(audio))  # type: ignore
+                # Wrapping the generator rather than iterating it here keeps
+                # pipecat's own push semantics (ErrorFrame → push_error_frame)
+                # as the only thing that forwards frames.
+                transcripts = 0
+                await self.process_generator(counting(super().run_stt(audio)))  # type: ignore
+                if not transcripts and self.on_empty_segment is not None:
+                    await self.on_empty_segment()
             except Exception as e:
                 # A failed segment must not kill the worker: every later
                 # transcript in the session would be lost with it.

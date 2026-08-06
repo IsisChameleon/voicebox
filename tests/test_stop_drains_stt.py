@@ -69,10 +69,12 @@ async def test_pending_transcript_reaches_artifacts(tmp_path):
 
 async def test_empty_transcription_still_emits_event():
     # F2: "we tried and got nothing" must be distinguishable from "the bot
-    # never spoke" — the old `if message.content:` gate swallowed it.
+    # never spoke". D24 re-homed the signal: it now arrives from the STT
+    # worker (no frame exists for a silent segment), so drive the agent's
+    # side of that callback rather than the emit helper directly.
     agent = PipecatMCPAgent(transport=None)  # type: ignore[arg-type]
 
-    await agent._emit_app_bot_transcript("")
+    await agent._on_empty_segment()
 
     event = agent._events[-1]
     assert event.type == EventType.APP_BOT_TRANSCRIPT
@@ -96,7 +98,7 @@ async def test_empty_transcript_still_claims_a_vad_start():
     agent._unclaimed_bot_speech_starts.append(100.0)
     agent._unclaimed_bot_speech_starts.append(200.0)
 
-    await agent._emit_app_bot_transcript("")
+    await agent._on_empty_segment()
     await agent._emit_app_bot_transcript("words")
 
     empty, spoken = agent._events[-2], agent._events[-1]

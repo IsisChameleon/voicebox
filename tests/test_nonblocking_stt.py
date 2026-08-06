@@ -229,3 +229,69 @@ def test_eager_model_decodes_inside_the_transcribe_call():
     assert consumed == [0, 1, 2]  # decoded during the call, nothing left lazy
     assert segments == ["seg-0", "seg-1", "seg-2"]
     assert info == {"language": "en"}
+
+
+class _SometimesSilentSTT(SegmentedSTTService):
+    """Stands in for Whisper recovering nothing from some segments.
+
+    Real Whisper yields NO frame at all for a segment it finds no text in
+    (``pipecat/services/whisper/stt.py:377``, ``if text:``), which is exactly
+    what makes the empty case invisible downstream.
+    """
+
+    def __init__(self, silent_segments: set[int], **kwargs):
+        super().__init__(**kwargs)
+        self.silent_segments = silent_segments
+        self.segments_seen = 0
+
+    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
+        """Yield one transcript, or nothing for a segment marked silent."""
+        self.segments_seen += 1
+        if self.segments_seen in self.silent_segments:
+            return
+        yield TranscriptionFrame(f"segment-{self.segments_seen}", "", time_now_iso8601())
+
+
+class _NonBlockingSometimesSilentSTT(NonBlockingSegmentedSTT, _SometimesSilentSTT):
+    """The production composition over a sometimes-silent Whisper."""
+
+
+async def test_empty_segment_signals_once_and_only_when_silent():
+    # D24 Phase 2: with delivery moved onto the TranscriptionFrame, a silent
+    # segment has no frame to carry "we tried and got nothing" — the worker,
+    # which sees a segment go in and no transcript come out, must say so. And
+    # exactly once per silent segment, or the app-bot VAD-start deque that
+    # every transcript claims from drifts.
+    stt = _NonBlockingSometimesSilentSTT(silent_segments={2})
+    empties: list[int] = []
+
+    async def on_empty():
+        empties.append(1)
+
+    stt.on_empty_segment = on_empty
+
+    async with _Harness(stt) as h:
+        await h.speech_segment()
+        await asyncio.sleep(0.5)
+        await h.speech_segment()
+        await asyncio.sleep(0.5)
+        await h.speech_segment()
+        await asyncio.sleep(0.5)
+
+        assert h.downstream.texts() == ["segment-1", "segment-3"]
+        assert len(empties) == 1, f"expected one empty signal, got {len(empties)}"
+
+
+async def test_empty_segment_signal_is_optional():
+    # Nothing sets the callback in the unit harness or in a bare service; a
+    # silent segment must not blow up the worker (which would lose every later
+    # transcript in the session).
+    stt = _NonBlockingSometimesSilentSTT(silent_segments={1})
+
+    async with _Harness(stt) as h:
+        await h.speech_segment()
+        await asyncio.sleep(0.5)
+        await h.speech_segment()
+        await asyncio.sleep(0.5)
+
+        assert h.downstream.texts() == ["segment-2"]

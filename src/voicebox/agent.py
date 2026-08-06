@@ -393,6 +393,20 @@ class PipecatMCPAgent:
             )
         )
 
+    async def _on_empty_segment(self):
+        """Report an app-bot segment Whisper recovered no text from.
+
+        Task F's "we tried and got nothing": an empty-flagged event tells a
+        reader that, where plain silence would read as "the app bot never
+        spoke". Whisper emits no frame at all for such a segment, so this
+        arrives from the STT worker rather than from the observer.
+
+        It also keeps ``_unclaimed_bot_speech_starts`` in lockstep: the silent
+        segment claims its own VAD start, so every later transcript still
+        claims its own rather than a neighbour's.
+        """
+        await self._emit_app_bot_transcript("")
+
     async def _on_pipeline_frame(self, frame: Frame):
         """Translate an observed pipeline frame into a log event.
 
@@ -464,6 +478,7 @@ class PipecatMCPAgent:
             )
 
         stt = self._stt = self._create_stt_service()
+        stt.on_empty_segment = self._on_empty_segment
         tts = self._create_tts_service()
         vad = self._create_vad_processor()
 
