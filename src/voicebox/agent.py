@@ -114,17 +114,6 @@ PLAYOUT_TIMEOUT_SECS = 30.0
 # which must outlive this window (D15).
 PLAYOUT_SECS_PER_WORD = 0.8
 
-# How long the aggregator's watchdog lets a user turn sit stopped-but-textless
-# before force-closing it. pipecat's 5 s default assumes streaming STT, where a
-# transcript trails speech by well under a second. Ours is batch Whisper on
-# CPU, and under load the decode approaches ~1x realtime (round 4 measured a
-# 116 s narration decoding for 108 s) — every time the watchdog fires first,
-# the turn closes empty and the late transcript re-emits as an orphan event
-# stamped at arrival time (rounds 1 and 4 both hit this). 240 s outlives the
-# 180 s drain cap, i.e. any decode the session would wait for at all; a
-# genuinely transcript-less turn still closes, just later.
-TURN_STOP_TIMEOUT_SECS = 240.0
-
 
 # The STT services are composed from two mixins, in this order:
 #   NonBlockingSegmentedSTT — transcribes on a worker, off the frame task.
@@ -539,7 +528,9 @@ class PipecatMCPAgent:
                 vad_stop_secs=VAD_STOP_SECS,
                 note=(
                     "app_bot_speech_stopped.t lands ~vad_stop_secs after true "
-                    "speech end; app_bot_transcript arrives later still (batch STT)"
+                    "speech end; app_bot_transcript arrives later still (batch STT) "
+                    "and is emitted the moment the decode finishes — see "
+                    "transcription_lag_secs for how far behind this machine is"
                 ),
             )
         )
@@ -982,10 +973,10 @@ class PipecatMCPAgent:
         return LLMContextAggregatorPair(
             context,
             user_params=LLMUserAggregatorParams(
-                # Batch Whisper delivers the transcript long after the VAD
-                # stop; at the 5 s default the watchdog force-closed the turn
-                # first (see TURN_STOP_TIMEOUT_SECS).
-                user_turn_stop_timeout=TURN_STOP_TIMEOUT_SECS,
+                # No user_turn_stop_timeout override: pipecat's 5 s default
+                # applies to a turn nothing consumes. The app bot's transcript
+                # no longer rides on turn closure (D24), so no value here is
+                # compared against Whisper's decode speed.
                 user_turn_strategies=UserTurnStrategies(
                     # The "user" of this pipeline is the REMOTE BOT (its audio
                     # is our input). The default start strategies ship with

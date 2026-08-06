@@ -294,19 +294,15 @@ async def test_ungated_speak_has_no_wait_key():
     assert result == {"queued": True}
 
 
-def test_turn_stop_timeout_outlives_batch_stt():
-    # pipecat's 5 s watchdog default assumes streaming STT. Batch Whisper
-    # delivers text ~0.5x realtime AFTER the VAD stop, so at 5 s every long
-    # turn was force-closed empty and the late transcript re-opened a turn
-    # stamped at arrival time (turn_started_at lied by 25-34 s live).
+def test_no_voicebox_constant_is_sized_against_decode_speed():
+    # D24: the turn-stop watchdog was overridden to 240 s purely so the app
+    # bot's transcript could outrun it. With delivery on the frame, the turn is
+    # consumed by nothing and pipecat's default stands — voicebox holds no
+    # constant that has to be >= the slowest Whisper decode on any machine.
     from pipecat.processors.aggregators.llm_context import LLMContext
-
-    from voicebox.processors.nonblocking_whisper_stt import DRAIN_CAP_SECS
 
     agent = PipecatMCPAgent(transport=None)  # type: ignore[arg-type]
     user_aggregator, _ = agent._create_context_aggregators(LLMContext())
 
-    assert user_aggregator._params.user_turn_stop_timeout == agent_module.TURN_STOP_TIMEOUT_SECS
-    # Must outlive the drain cap: any decode stop() would wait for must also
-    # beat the watchdog, or the turn closes empty mid-drain (round 4).
-    assert agent_module.TURN_STOP_TIMEOUT_SECS > DRAIN_CAP_SECS
+    assert not hasattr(agent_module, "TURN_STOP_TIMEOUT_SECS")
+    assert user_aggregator._params.user_turn_stop_timeout == 5.0  # pipecat's default

@@ -78,9 +78,21 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
   Claude via `listen()`'s return value, not RTVI data-channel notifications.
 - **Timestamps surface via the event log** (Stage 2): a pipeline observer in `agent.py` turns
   `VADUserStarted/StoppedSpeakingFrame` (wall-clock `timestamp`), `BotStarted/StoppedSpeakingFrame`
-  (our playout span) and `UserTurnStoppedMessage` into `listen()` events. Still true: STT is
+  (our playout span) and `TranscriptionFrame` into `listen()` events. Still true: STT is
   batch+VAD-segmented, so *per-word* receive timestamps are NOT obtainable — utterance-level only,
   and `bot_speech_stopped.t` lands ~`vad_stop_secs` (1.0 s) late by construction.
+- **The app bot's transcript is delivered on frame arrival, never on turn closure** (D24). The
+  observer watches `TranscriptionFrame` at the `stt`→`user_aggregator` hop — the aggregator
+  *consumes* it and never pushes it on, but observers see pushes, so the inbound hop is the one to
+  watch. The `on_user_turn_stopped` handler and the 240 s `TURN_STOP_TIMEOUT_SECS` override are
+  gone: nothing consumes the app bot's turn, so **no voicebox constant is sized against Whisper's
+  decode speed**. A slow machine reports its lag in `listen()`'s `transcription_lag_secs`.
+  Corollary: Whisper yields NO frame for a segment it recovers no text from, so the
+  `transcription_empty: true` event comes from the STT worker's `on_empty_segment` callback
+  (`nonblocking_whisper_stt.py`) — and it must fire exactly once per silent segment, or the
+  VAD-start deque that every transcript claims from drifts by one for the rest of the session.
+  The app-bot aggregator and `LocalSmartTurnAnalyzerV3` are now vestigial; removing them is a
+  separate design pass (spec Phase 4), because tester frames still route *through* the aggregator.
 - **`record_dir` exists** (`runner_args.py`, `agent.py` `_dump_artifacts`): set it and `stop()` writes
   user/bot/merged WAVs via `AudioBufferProcessor`. Snapshot buffers BEFORE `stop_recording()` — it
   resets them. The BROWSER child adds `shim.log` (every `[voice-shim]` console line, live) and
