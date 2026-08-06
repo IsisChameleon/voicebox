@@ -627,3 +627,53 @@ parent fails fast, not at the timeout.
 only helps when the child dies *without* running Python exception handling
 (SIGKILL/OOM), a case rare enough that the extra polling loop and its own race
 windows don't earn their cost; the queue write covers every exception path.
+
+## D24 — The app bot's transcript is delivered on frame arrival, not turn closure
+
+*2026-08-06. Branch `fix/decouple-transcript-delivery`. Design:
+`docs/specs/2026-08-06-decouple-transcripts-from-turn-closure.md`.*
+
+**Context:** the app bot's transcript could only reach `listen()` when the app
+bot's turn aggregator closed a turn, and that closure is decided by a timer.
+The timer therefore had to outlast the slowest Whisper decode, or the turn
+closed empty and the real transcript arrived late, mistimed and orphaned. That
+is `TURN_STOP_TIMEOUT_SECS = 240.0` (`agent.py:126`) against a pipecat default
+of 5.0 — not a tuning choice but a bet, measured on one Linux CPU box, that no
+machine decodes slower than 240 s per utterance. Decode speed varies by OS,
+CPU/GPU and Whisper backend, so any constant that must be ≥ worst-case decode
+time is wrong on hardware we do not control.
+
+**Decided:** remove the dependency rather than size it. voicebox already knows
+*when* the app bot spoke, from its own VAD log — instantly and identically on
+every machine; only *what it said* needs Whisper. So the app bot's transcript is
+emitted by the pipeline observer the moment the `TranscriptionFrame` is pushed
+`stt`→`user_aggregator`, stamped with the VAD start of the utterance it belongs
+to. The observer becomes the single source of app-bot events — speech spans
+*and* text — and `on_user_turn_stopped` is no longer borrowed as a courier. The
+"we tried and got nothing" signal moves with it, to the component that knows: an
+`on_empty_segment` callback on the STT worker. With no consumer left,
+`TURN_STOP_TIMEOUT_SECS` is deleted and pipecat's default applies to a turn
+nothing reads. After this, no value anywhere in voicebox is compared against
+decode speed; a slow machine reports its lag through the existing
+`transcription_lag_secs` field instead of encoding it in a constant.
+
+This carries through a decision already made once: D10 stopped trusting the
+aggregator's timestamp for app-bot turn *timing* (observed off by up to 103 s)
+and re-derived it from voicebox's own VAD log. D24 extends that from timing to
+*delivery*.
+
+**Rejected — a startup probe / warm-up calibration** that measures Whisper
+decode speed per machine and sizes the timeout from it. It would have made the
+number adaptive while keeping the coupling, and it charges every user a
+benchmark at session start they never asked for, against voicebox's "no API
+keys, easy to use" goal. Deleting the constant leaves nothing to calibrate.
+
+**Rejected — a custom `EmptySegmentFrame`** for the empty-segment signal: more
+machinery than a one-consumer, one-producer signal earns.
+
+**Deferred, not rejected — removing the vestigial turn machinery**
+(`LLMContextAggregatorPair`, the user-turn stop strategies,
+`LocalSmartTurnAnalyzerV3`). They have no consumer on the app-bot side once
+delivery moves, but removing them changes the route tester frames take (they
+currently traverse the app-bot aggregator on their way to the TTS), so the blast
+radius reaches the tester side. It gets its own design pass once this lands.
