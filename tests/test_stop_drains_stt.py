@@ -36,9 +36,7 @@ class _LateTranscriptSTT(NonBlockingSegmentedSTT):
 
     async def drain(self, timeout: float) -> bool:
         """Deliver the pending transcript mid-drain, like a real late Whisper."""
-        await self._agent._emit_app_bot_transcript(
-            "the last thing the bot said", "2026-08-03T10:00:00.000+00:00"
-        )
+        await self._agent._emit_app_bot_transcript("the last thing the bot said")
         return True
 
 
@@ -74,7 +72,7 @@ async def test_empty_transcription_still_emits_event():
     # never spoke" — the old `if message.content:` gate swallowed it.
     agent = PipecatMCPAgent(transport=None)  # type: ignore[arg-type]
 
-    await agent._emit_app_bot_transcript("", "2026-08-03T10:00:00.000+00:00")
+    await agent._emit_app_bot_transcript("")
 
     event = agent._events[-1]
     assert event.type == EventType.APP_BOT_TRANSCRIPT
@@ -85,7 +83,7 @@ async def test_empty_transcription_still_emits_event():
 async def test_nonempty_transcription_is_not_flagged():
     agent = PipecatMCPAgent(transport=None)  # type: ignore[arg-type]
 
-    await agent._emit_app_bot_transcript("words", "2026-08-03T10:00:00.000+00:00")
+    await agent._emit_app_bot_transcript("words")
 
     assert agent._events[-1].transcription_empty is False  # type: ignore[attr-defined]
 
@@ -98,8 +96,8 @@ async def test_empty_transcript_still_claims_a_vad_start():
     agent._unclaimed_bot_speech_starts.append(100.0)
     agent._unclaimed_bot_speech_starts.append(200.0)
 
-    await agent._emit_app_bot_transcript("", "fallback")
-    await agent._emit_app_bot_transcript("words", "fallback")
+    await agent._emit_app_bot_transcript("")
+    await agent._emit_app_bot_transcript("words")
 
     empty, spoken = agent._events[-2], agent._events[-1]
     assert empty.turn_started_at == "1970-01-01T00:01:40.000+00:00"  # type: ignore[attr-defined]

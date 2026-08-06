@@ -1,9 +1,23 @@
 import asyncio
 
 import pytest
+from pipecat.frames.frames import Frame, TranscriptionFrame, VADUserStartedSpeakingFrame
+from pipecat.processors.frame_processor import FrameDirection
 
 import voicebox.agent as agent_module
 from voicebox.agent import PipecatMCPAgent
+from voicebox.events import EventType
+
+
+def _pushed(frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
+    """Wrap a frame as the observer's on_push_frame payload."""
+    return agent_module.FramePushed(
+        source=None,  # type: ignore[arg-type]
+        destination=None,  # type: ignore[arg-type]
+        frame=frame,
+        direction=direction,
+        timestamp=0,
+    )
 
 
 class _NoopPipelineTask:
@@ -121,21 +135,57 @@ async def test_transcript_turn_started_at_uses_observed_vad_start():
     agent._unclaimed_bot_speech_starts.append(100.0)
     agent._unclaimed_bot_speech_starts.append(200.0)
 
-    await agent._emit_app_bot_transcript("first chunk", "1970-01-01T00:99:99")
+    await agent._emit_app_bot_transcript("first chunk")
 
     event = agent._events[-1]
     assert event.turn_started_at == "1970-01-01T00:01:40.000+00:00"  # epoch 100.0
     assert list(agent._unclaimed_bot_speech_starts) == [200.0]  # claimed exactly one
 
 
-async def test_transcript_turn_started_at_falls_back_to_aggregator():
-    # No observed VAD start (shouldn't happen live) — keep pipecat's stamp
-    # rather than inventing one.
+async def test_transcription_frame_emits_transcript_on_arrival():
+    # D24: the transcript reaches listen() when its TranscriptionFrame is
+    # pushed, not when a turn timer closes the app bot's turn. Driven through
+    # the observer, so this also pins TranscriptionFrame into _WATCHED.
     agent = _agent_ready_to_speak()
+    observer = agent_module._PipelineEventObserver(agent)
 
-    await agent._emit_app_bot_transcript("text", "2026-08-03T09:40:58.127+00:00")
+    await observer.on_push_frame(
+        _pushed(VADUserStartedSpeakingFrame(timestamp=100.0))  # type: ignore[call-arg]
+    )
+    await observer.on_push_frame(_pushed(TranscriptionFrame("hello there", "", "iso")))
 
-    assert agent._events[-1].turn_started_at == "2026-08-03T09:40:58.127+00:00"
+    types = [e.type for e in agent._events]
+    assert types == [EventType.APP_BOT_SPEECH_STARTED, EventType.APP_BOT_TRANSCRIPT]
+    transcript = agent._events[-1]
+    assert transcript.text == "hello there"  # type: ignore[attr-defined]
+    assert transcript.turn_started_at == "1970-01-01T00:01:40.000+00:00"  # type: ignore[attr-defined]
+    assert transcript.transcription_empty is False  # type: ignore[attr-defined]
+
+
+async def test_transcription_frame_emitted_once_across_hops():
+    # The same frame instance is observed at every hop it traverses; the
+    # frame-id dedup must keep that to one event.
+    agent = _agent_ready_to_speak()
+    observer = agent_module._PipelineEventObserver(agent)
+    frame = TranscriptionFrame("said once", "", "iso")
+
+    await observer.on_push_frame(_pushed(frame))
+    await observer.on_push_frame(_pushed(frame))
+
+    assert [e.type for e in agent._events] == [EventType.APP_BOT_TRANSCRIPT]
+
+
+async def test_upstream_pushes_are_ignored():
+    # Only downstream pushes count (the output transport emits paired
+    # upstream/downstream siblings).
+    agent = _agent_ready_to_speak()
+    observer = agent_module._PipelineEventObserver(agent)
+
+    await observer.on_push_frame(
+        _pushed(TranscriptionFrame("upstream", "", "iso"), direction=FrameDirection.UPSTREAM)
+    )
+
+    assert agent._events == []
 
 
 async def test_listen_lag_sampled_after_speech_stop_settles():
