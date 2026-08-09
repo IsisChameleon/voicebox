@@ -627,3 +627,153 @@ parent fails fast, not at the timeout.
 only helps when the child dies *without* running Python exception handling
 (SIGKILL/OOM), a case rare enough that the extra polling loop and its own race
 windows don't earn their cost; the queue write covers every exception path.
+
+## D24 — The app bot's transcript is delivered on frame arrival, not turn closure
+
+*2026-08-06. Branch `fix/decouple-transcript-delivery`. Design:
+`docs/specs/2026-08-06-decouple-transcripts-from-turn-closure.md`.*
+
+**Context:** the app bot's transcript could only reach `listen()` when the app
+bot's turn aggregator closed a turn, and that closure is decided by a timer.
+The timer therefore had to outlast the slowest Whisper decode, or the turn
+closed empty and the real transcript arrived late, mistimed and orphaned. That
+is `TURN_STOP_TIMEOUT_SECS = 240.0` (`agent.py:126`) against a pipecat default
+of 5.0 — not a tuning choice but a bet, measured on one Linux CPU box, that no
+machine decodes slower than 240 s per utterance. Decode speed varies by OS,
+CPU/GPU and Whisper backend, so any constant that must be ≥ worst-case decode
+time is wrong on hardware we do not control.
+
+**Decided:** remove the dependency rather than size it. voicebox already knows
+*when* the app bot spoke, from its own VAD log — instantly and identically on
+every machine; only *what it said* needs Whisper. So the app bot's transcript is
+emitted by the pipeline observer the moment the `TranscriptionFrame` is pushed
+`stt`→`user_aggregator`, stamped with the VAD start of the utterance it belongs
+to. The observer becomes the single source of app-bot events — speech spans
+*and* text — and `on_user_turn_stopped` is no longer borrowed as a courier. The
+"we tried and got nothing" signal moves with it, to the component that knows: an
+`on_empty_segment` callback on the STT worker. With no consumer left,
+`TURN_STOP_TIMEOUT_SECS` is deleted and pipecat's default applies to a turn
+nothing reads. After this, no value anywhere in voicebox is compared against
+decode speed; a slow machine reports its lag through the existing
+`transcription_lag_secs` field instead of encoding it in a constant.
+
+This carries through a decision already made once: D10 stopped trusting the
+aggregator's timestamp for app-bot turn *timing* (observed off by up to 103 s)
+and re-derived it from voicebox's own VAD log. D24 extends that from timing to
+*delivery*.
+
+**Rejected — a startup probe / warm-up calibration** that measures Whisper
+decode speed per machine and sizes the timeout from it. It would have made the
+number adaptive while keeping the coupling, and it charges every user a
+benchmark at session start they never asked for, against voicebox's "no API
+keys, easy to use" goal. Deleting the constant leaves nothing to calibrate.
+
+**Rejected — a custom `EmptySegmentFrame`** for the empty-segment signal: more
+machinery than a one-consumer, one-producer signal earns.
+
+**Deferred, not rejected — removing the vestigial turn machinery**
+(`LLMContextAggregatorPair`, the user-turn stop strategies,
+`LocalSmartTurnAnalyzerV3`). They have no consumer on the app-bot side once
+delivery moves, but removing them changes the route tester frames take (they
+currently traverse the app-bot aggregator on their way to the TTS), so the blast
+radius reaches the tester side. It gets its own design pass once this lands.
+
+## D25 — A failed transcription is not a silent segment
+
+*2026-08-09. Branch `fix/decouple-transcript-delivery`. Refines D24 (Phase 2);
+found by review of the branch diff, not by a failure in the field.*
+
+**Context:** D24 moved the "we tried and got nothing" signal onto the STT
+worker, which fired `on_empty_segment` whenever a segment produced no
+`TranscriptionFrame`. That test — *no transcript* — is broader than the
+condition it was meant to detect. pipecat's Whisper services report a **failed**
+transcription by *yielding* an `ErrorFrame` rather than raising: the MLX service
+wraps its whole body in `except Exception: yield ErrorFrame(...)`
+(`pipecat/services/whisper/stt.py:547-548`) and the faster-whisper service
+yields one when the model is missing (`:354-356`). Neither reaches the worker's
+`except Exception`, so a broken decode was indistinguishable from silence. The
+cost is not a cosmetic mislabel: `_on_empty_segment` claims one entry from
+`_unclaimed_bot_speech_starts`, so a failed segment consumed a VAD start it
+never earned and **every later transcript in the session** was stamped with a
+neighbour's — the D10 deque drift D24's Phase 2 exists to prevent, re-entering
+through the error door.
+
+**Decided:** the empty signal fires only when the run produced **neither** a
+transcript **nor** an error. The existing pass-through wrapper already sees
+every frame, so it counts `ErrorFrame`s alongside `TranscriptionFrame`s and the
+condition gains one term (`nonblocking_whisper_stt.py:196-227`). Three outcomes,
+three behaviours: transcript → event; error → pipecat's error path only, no
+event, no VAD start claimed; nothing at all → `transcription_empty`. Raised
+exceptions keep their existing handling (log, drop the segment, keep the worker
+alive) — the worker survives an `ErrorFrame` run for free, since nothing throws.
+
+**Rejected — treating the error as its own `listen()` event** (an
+`app_bot_transcription_failed`, say). It would need a party, a place in
+`events.py`, and a consumer; no caller has asked to distinguish "Whisper broke"
+from "the app bot said nothing we could hear", and pipecat already surfaces the
+failure on its own error path. Silence in the event log is the honest answer
+until a consumer exists. The VAD start stays unclaimed, which is correct: the
+utterance it belongs to was never transcribed, so no transcript should claim it.
+
+**Rejected — catching the `ErrorFrame` and retrying the segment.** Retrying a
+decode that failed for an unknown reason, in-order, on the single worker, risks
+stalling every later segment behind it; the drain budget
+(`DRAIN_BASE_SECS`/`DRAIN_CAP_SECS`) is sized for one pass over the backlog.
+
+## D26 — A failed segment still has to retire its VAD start
+
+*2026-08-09. Branch `fix/decouple-transcript-delivery`. Corrects the last
+paragraph of D25; found by review of the D25 fix, not by a failure in the
+field.*
+
+**Context:** D25 stopped a failed segment from being reported as
+`transcription_empty: true`, and reasoned that "the VAD start stays unclaimed,
+which is correct: the utterance it belongs to was never transcribed, so no
+transcript should claim it." That is right about *whose* start it is and wrong
+about what happens to it. `_unclaimed_bot_speech_starts` is a FIFO the observer
+appends to once per app-bot VAD start, and `_emit_app_bot_transcript`
+unconditionally pops the oldest entry (`agent.py:369-373`). Leaving the failed
+segment's start at the head does not park it — it hands it to the next
+transcript:
+
+| # | segment | VAD start logged | deque | transcript stamped |
+|---|---|---|---|---|
+| 1 | Whisper `ErrorFrame` | 100 | `[100]` | — |
+| 2 | "hello" | 200 | `[100, 200]` | **100** ❌ |
+
+and every later transcript in the session keeps that one-interval offset. So
+D25 moved the drift from the empty-signal door to the error door rather than
+closing it. The D25 test proves the worker's *classification* and never reaches
+the agent, which is why it passed.
+
+**Decided:** the invariant is per-segment, not per-outcome — **every segment
+that yields no `TranscriptionFrame` signals the agent exactly once**, and the
+signal says which outcome it was. `on_failed_segment` joins `on_empty_segment`
+on the STT worker; the agent's handler pops one start and emits nothing
+(`agent.py:_on_failed_segment`). A transcript needs no signal: it claims its own
+start on arrival. Writing it as one branch in the worker
+(`nonblocking_whisper_stt.py:210-245`) is what makes "a third outcome forgets to
+tell the agent" un-writable rather than merely fixed: the choice is *which*
+signal, never *whether*.
+
+A raised exception takes the failure branch too. D25 left it alone ("keeps its
+existing handling"), but a raise drops a segment exactly as an `ErrorFrame` does
+and drifted the deque identically — the same bug through a third door.
+
+**Rejected — one typed `on_segment_complete(outcome)` callback** in place of the
+two. It reads better in the abstract and would scale to a fourth outcome, but it
+buys nothing today (two producers, two consumers, no shared body) and costs an
+enum in the STT module that the agent has to switch on. Revisit if a third
+non-transcript outcome ever appears.
+
+**Rejected — making the agent tolerate drift instead** (e.g. matching
+transcripts to starts by timestamp proximity rather than by order). The FIFO is
+correct *because* the STT worker is single and ordered (D10); a fuzzy match
+would trade a provable invariant for a heuristic in order to paper over a
+missing signal.
+
+**Test debt this closes:** the regression test now drives the real
+`_PipelineEventObserver` and the real agent over a pipeline whose Whisper fails
+segment 1, and asserts the transcript from segment 2 carries segment 2's start
+(`tests/test_nonblocking_stt.py::test_failed_segment_leaves_the_next_transcripts_vad_start_alone`).
+A worker-level test cannot see this class of bug at all.

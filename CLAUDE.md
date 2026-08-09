@@ -78,9 +78,29 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
   Claude via `listen()`'s return value, not RTVI data-channel notifications.
 - **Timestamps surface via the event log** (Stage 2): a pipeline observer in `agent.py` turns
   `VADUserStarted/StoppedSpeakingFrame` (wall-clock `timestamp`), `BotStarted/StoppedSpeakingFrame`
-  (our playout span) and `UserTurnStoppedMessage` into `listen()` events. Still true: STT is
+  (our playout span) and `TranscriptionFrame` into `listen()` events. Still true: STT is
   batch+VAD-segmented, so *per-word* receive timestamps are NOT obtainable — utterance-level only,
   and `bot_speech_stopped.t` lands ~`vad_stop_secs` (1.0 s) late by construction.
+- **The app bot's transcript is delivered on frame arrival, never on turn closure** (D24). The
+  observer watches `TranscriptionFrame` at the `stt`→`user_aggregator` hop — the aggregator
+  *consumes* it and never pushes it on, but observers see pushes, so the inbound hop is the one to
+  watch. The `on_user_turn_stopped` handler and the 240 s `TURN_STOP_TIMEOUT_SECS` override are
+  gone: nothing consumes the app bot's turn, so **no voicebox constant is sized against Whisper's
+  decode speed**. A slow machine reports its lag in `listen()`'s `transcription_lag_secs`.
+  Corollary: Whisper yields NO frame for a segment it recovers no text from, so the
+  `transcription_empty: true` event comes from the STT worker's `on_empty_segment` callback
+  (`nonblocking_whisper_stt.py`) — and it must fire exactly once per silent segment, or the
+  VAD-start deque that every transcript claims from drifts by one for the rest of the session.
+  A *failed* decode is not silence and must not fire it (D25): pipecat's Whisper services report
+  failure by **yielding an `ErrorFrame`**, not by raising (`whisper/stt.py:354-356`, and the MLX
+  catch-all at `:547-548`), so the worker's `except` never sees one — it counts them instead.
+  But it must still *retire* the start (D26): the deque advances one entry per **segment**, so a
+  failure that signals nothing hands its start to the next transcript. The invariant is per-segment,
+  not per-outcome — every segment yielding no `TranscriptionFrame` signals exactly once,
+  `on_empty_segment` (ran, no text) or `on_failed_segment` (`ErrorFrame` *or* raised: pop the start,
+  emit nothing). A worker-level test cannot see this class of bug; it needs the agent in the loop.
+  The app-bot aggregator and `LocalSmartTurnAnalyzerV3` are now vestigial; removing them is a
+  separate design pass (spec Phase 4), because tester frames still route *through* the aggregator.
 - **`record_dir` exists** (`runner_args.py`, `agent.py` `_dump_artifacts`): set it and `stop()` writes
   user/bot/merged WAVs via `AudioBufferProcessor`. Snapshot buffers BEFORE `stop_recording()` — it
   resets them. The BROWSER child adds `shim.log` (every `[voice-shim]` console line, live) and

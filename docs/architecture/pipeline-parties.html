@@ -1,0 +1,334 @@
+<title>voicebox pipeline — which stage serves which bot</title>
+<style>
+  :root {
+    --bg: #14171C;
+    --surface: #1C2027;
+    --surface-2: #232831;
+    --line: #2E3540;
+    --ink: #E4E7EC;
+    --ink-dim: #98A0AC;
+    --ink-faint: #6C7683;
+    --app: #E8A33D;
+    --app-soft: rgba(232, 163, 61, 0.13);
+    --tester: #3FBFB0;
+    --tester-soft: rgba(63, 191, 176, 0.13);
+    --ghost: #5A6472;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #ECEDF0;
+      --surface: #FFFFFF;
+      --surface-2: #F4F5F7;
+      --line: #D5D8DF;
+      --ink: #171A20;
+      --ink-dim: #5B6472;
+      --ink-faint: #838C99;
+      --app: #A96A0C;
+      --app-soft: rgba(169, 106, 12, 0.10);
+      --tester: #0F6E63;
+      --tester-soft: rgba(15, 110, 99, 0.10);
+      --ghost: #8B94A1;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #ECEDF0;
+    --surface: #FFFFFF;
+    --surface-2: #F4F5F7;
+    --line: #D5D8DF;
+    --ink: #171A20;
+    --ink-dim: #5B6472;
+    --ink-faint: #838C99;
+    --app: #A96A0C;
+    --app-soft: rgba(169, 106, 12, 0.10);
+    --tester: #0F6E63;
+    --tester-soft: rgba(15, 110, 99, 0.10);
+    --ghost: #8B94A1;
+  }
+  :root[data-theme="dark"] {
+    --bg: #14171C;
+    --surface: #1C2027;
+    --surface-2: #232831;
+    --line: #2E3540;
+    --ink: #E4E7EC;
+    --ink-dim: #98A0AC;
+    --ink-faint: #6C7683;
+    --app: #E8A33D;
+    --app-soft: rgba(232, 163, 61, 0.13);
+    --tester: #3FBFB0;
+    --tester-soft: rgba(63, 191, 176, 0.13);
+    --ghost: #5A6472;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.6;
+    margin: 0;
+    padding: 3rem 1.5rem 5rem;
+  }
+  .wrap { max-width: 62rem; margin: 0 auto; display: flex; flex-direction: column; gap: 3rem; }
+
+  header { display: flex; flex-direction: column; gap: 0.75rem; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  h1 {
+    font-size: clamp(1.6rem, 4vw, 2.35rem);
+    line-height: 1.15;
+    margin: 0;
+    font-weight: 600;
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+  }
+  .standfirst {
+    font-size: 1.05rem;
+    color: var(--ink-dim);
+    max-width: 48ch;
+    margin: 0;
+  }
+  .status {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--ink-faint);
+    border-left: 2px solid var(--ghost);
+    padding-left: 0.85rem;
+    margin: 0.35rem 0 0;
+  }
+
+  .figure {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1.5rem 1rem;
+    overflow-x: auto;
+  }
+  .figure svg { display: block; min-width: 640px; width: 100%; height: auto; }
+
+  h2 {
+    font-size: 0.78rem;
+    font-family: var(--mono);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 0.9rem;
+    font-weight: 500;
+  }
+  .notes { display: grid; gap: 2.25rem; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); }
+  .note p { margin: 0 0 0.75rem; color: var(--ink-dim); font-size: 0.94rem; }
+  .note p:last-child { margin-bottom: 0; }
+  .note strong { color: var(--ink); font-weight: 600; }
+  code {
+    font-family: var(--mono);
+    font-size: 0.86em;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 0.08em 0.34em;
+    color: var(--ink);
+  }
+  .app-tint { color: var(--app); }
+  .tester-tint { color: var(--tester); }
+
+  .sources { display: flex; flex-direction: column; gap: 0.5rem; }
+  .sources div {
+    display: grid;
+    grid-template-columns: 8.5rem 1fr;
+    gap: 0.85rem;
+    font-size: 0.9rem;
+    color: var(--ink-dim);
+    align-items: baseline;
+  }
+  .sources dfn {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    font-style: normal;
+    color: var(--ink);
+  }
+
+  footer {
+    border-top: 1px solid var(--line);
+    padding-top: 1.25rem;
+    font-size: 0.82rem;
+    color: var(--ink-faint);
+    font-family: var(--mono);
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .march { animation: march 2.4s linear infinite; }
+  }
+  @keyframes march { to { stroke-dashoffset: -24; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">voicebox · signal chain</div>
+    <h1>One pipeline, two bots, and a slot where the LLM used to be</h1>
+    <p class="standfirst">pipecat names parties by direction, not identity. Knowing that turns every stage name in this pipeline from confusing into obvious.</p>
+    <p class="status">Describes the pipeline after the Phase 1–3 changes in docs/specs/2026-08-06-decouple-transcripts-from-turn-closure.md</p>
+  </header>
+
+  <div class="figure">
+    <svg viewBox="0 0 940 1010" role="img" aria-label="Vertical signal chain of seven pipeline stages. The first four serve the app bot under test, the last three serve the tester, with a removed LLM slot between them.">
+      <defs>
+        <style>
+          .card { fill: var(--surface-2); stroke: var(--line); stroke-width: 1; }
+          .id { font-family: var(--mono); font-size: 14px; font-weight: 600; fill: var(--ink); }
+          .desc { font-family: var(--sans); font-size: 12.5px; fill: var(--ink-dim); }
+          .tag { font-family: var(--mono); font-size: 11px; }
+          .badge-t { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.11em; font-weight: 600; }
+          .rail-label { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; fill: var(--ink-faint); }
+          .legend-t { font-family: var(--sans); font-size: 12px; fill: var(--ink-dim); }
+        </style>
+      </defs>
+
+      <!-- ============ RAILS (left gutter) ============ -->
+      <path d="M 126 66 L 126 618" stroke="var(--tester)" stroke-width="2" fill="none" stroke-dasharray="5 7" opacity="0.75" class="march"/>
+      <path d="M 126 618 L 126 900" stroke="var(--tester)" stroke-width="2.5" fill="none"/>
+      <path d="M 90 156 L 90 456" stroke="var(--app)" stroke-width="2.5" fill="none"/>
+      <path d="M 82 456 L 98 456" stroke="var(--app)" stroke-width="2.5" fill="none"/>
+
+      <!-- chevron flow marks instead of arrowheads -->
+      <g stroke="var(--app)" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0.9">
+        <path d="M 84 206 L 90 213 L 96 206"/>
+        <path d="M 84 306 L 90 313 L 96 306"/>
+        <path d="M 84 406 L 90 413 L 96 406"/>
+      </g>
+      <g stroke="var(--tester)" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0.9">
+        <path d="M 120 116 L 126 123 L 132 116"/>
+        <path d="M 120 316 L 126 323 L 132 316"/>
+        <path d="M 120 516 L 126 523 L 132 516"/>
+        <path d="M 120 716 L 126 723 L 132 716"/>
+        <path d="M 120 856 L 126 863 L 132 856"/>
+      </g>
+
+      <text class="rail-label" transform="rotate(-90 44 320)" x="44" y="320" text-anchor="middle" fill="var(--app)" opacity="0.85">APP BOT AUDIO</text>
+      <text class="rail-label" transform="rotate(-90 44 760)" x="44" y="760" text-anchor="middle" fill="var(--tester)" opacity="0.85">TESTER AUDIO</text>
+
+      <!-- ============ INJECTION PILL ============ -->
+      <rect x="170" y="34" width="620" height="46" rx="3" fill="var(--tester-soft)" stroke="var(--tester)" stroke-width="1" stroke-dasharray="4 4"/>
+      <text class="id" x="188" y="55" fill="var(--tester)">speak()</text>
+      <text class="desc" x="188" y="72">Claude's words enter the task queue here — above the first stage</text>
+      <text class="tag" x="774" y="61" text-anchor="end" fill="var(--tester)" opacity="0.85">TESTER · injected</text>
+
+      <!-- ============ STAGE 1 ============ -->
+      <rect class="card" x="170" y="118" width="620" height="76" rx="3"/>
+      <rect x="170" y="118" width="3" height="76" fill="var(--app)"/>
+      <text class="id" x="190" y="145">transport.input()</text>
+      <text class="desc" x="190" y="166">The app bot's audio arrives from the browser tap</text>
+      <text class="tag" x="190" y="184" fill="var(--app)" opacity="0.9">▸ app bot audio originates here · 16 kHz</text>
+      <rect x="694" y="132" width="76" height="18" rx="2" fill="var(--app-soft)" stroke="var(--app)" stroke-width="0.75"/>
+      <text class="badge-t" x="732" y="145" text-anchor="middle" fill="var(--app)">APP BOT</text>
+
+      <!-- ============ STAGE 2 ============ -->
+      <rect class="card" x="170" y="218" width="620" height="76" rx="3"/>
+      <rect x="170" y="218" width="3" height="76" fill="var(--app)"/>
+      <text class="id" x="190" y="245">vad</text>
+      <text class="desc" x="190" y="266">Marks where the app bot starts and stops speaking</text>
+      <text class="tag" x="190" y="284" fill="var(--app)">▸ speech spans emitted here · instant, same on every machine</text>
+      <rect x="694" y="232" width="76" height="18" rx="2" fill="var(--app-soft)" stroke="var(--app)" stroke-width="0.75"/>
+      <text class="badge-t" x="732" y="245" text-anchor="middle" fill="var(--app)">APP BOT</text>
+
+      <!-- ============ STAGE 3 ============ -->
+      <rect class="card" x="170" y="318" width="620" height="76" rx="3"/>
+      <rect x="170" y="318" width="3" height="76" fill="var(--app)"/>
+      <text class="id" x="190" y="345">stt <tspan class="desc" fill="var(--ink-faint)">(Whisper)</tspan></text>
+      <text class="desc" x="190" y="366">Transcribes what the app bot said, on a background worker</text>
+      <text class="tag" x="190" y="384" fill="var(--app)">▸ transcript emitted here, the moment it is produced</text>
+      <rect x="694" y="332" width="76" height="18" rx="2" fill="var(--app-soft)" stroke="var(--app)" stroke-width="0.75"/>
+      <text class="badge-t" x="732" y="345" text-anchor="middle" fill="var(--app)">APP BOT</text>
+
+      <!-- ============ STAGE 4 ============ -->
+      <rect class="card" x="170" y="418" width="620" height="76" rx="3"/>
+      <rect x="170" y="418" width="3" height="76" fill="var(--app)"/>
+      <text class="id" x="190" y="445">user_aggregator</text>
+      <text class="desc" x="190" y="466">Assembles the app bot's turn — pipecat calls the app bot &quot;user&quot;</text>
+      <text class="tag" x="190" y="484" fill="var(--ghost)">vestigial: its context has no consumer · consumes TranscriptionFrame</text>
+      <rect x="694" y="432" width="76" height="18" rx="2" fill="var(--app-soft)" stroke="var(--app)" stroke-width="0.75"/>
+      <text class="badge-t" x="732" y="445" text-anchor="middle" fill="var(--app)">APP BOT</text>
+
+      <!-- ============ GHOST SLOT ============ -->
+      <rect x="170" y="518" width="620" height="76" rx="3" fill="none" stroke="var(--ghost)" stroke-width="1" stroke-dasharray="6 6"/>
+      <text class="id" x="190" y="545" fill="var(--ghost)">[ LLM ]</text>
+      <text class="desc" x="190" y="566" fill="var(--ghost)">Deleted. Claude is the LLM — out of process, over MCP</text>
+      <text class="tag" x="190" y="584" fill="var(--ghost)">speak() hand-builds the frames this stage would have emitted</text>
+
+      <!-- ============ STAGE 5 ============ -->
+      <rect class="card" x="170" y="618" width="620" height="76" rx="3"/>
+      <rect x="170" y="618" width="3" height="76" fill="var(--tester)"/>
+      <text class="id" x="190" y="645">tts <tspan class="desc" fill="var(--ink-faint)">(Kokoro)</tspan></text>
+      <text class="desc" x="190" y="666">Synthesizes what the tester says</text>
+      <text class="tag" x="190" y="684" fill="var(--tester)">▸ text becomes audio here · 48 kHz</text>
+      <rect x="700" y="632" width="70" height="18" rx="2" fill="var(--tester-soft)" stroke="var(--tester)" stroke-width="0.75"/>
+      <text class="badge-t" x="735" y="645" text-anchor="middle" fill="var(--tester)">TESTER</text>
+
+      <!-- ============ STAGE 6 ============ -->
+      <rect class="card" x="170" y="718" width="620" height="76" rx="3"/>
+      <rect x="170" y="718" width="3" height="76" fill="var(--tester)"/>
+      <text class="id" x="190" y="745">assistant_aggregator</text>
+      <text class="desc" x="190" y="766">Records what the tester said — pipecat calls the tester &quot;assistant&quot;</text>
+      <rect x="700" y="732" width="70" height="18" rx="2" fill="var(--tester-soft)" stroke="var(--tester)" stroke-width="0.75"/>
+      <text class="badge-t" x="735" y="745" text-anchor="middle" fill="var(--tester)">TESTER</text>
+
+      <!-- ============ STAGE 7 ============ -->
+      <rect class="card" x="170" y="818" width="620" height="76" rx="3"/>
+      <rect x="170" y="818" width="3" height="76" fill="var(--tester)"/>
+      <text class="id" x="190" y="845">transport.output()</text>
+      <text class="desc" x="190" y="866">The tester's audio goes to the browser's fake microphone</text>
+      <rect x="700" y="832" width="70" height="18" rx="2" fill="var(--tester-soft)" stroke="var(--tester)" stroke-width="0.75"/>
+      <text class="badge-t" x="735" y="845" text-anchor="middle" fill="var(--tester)">TESTER</text>
+
+      <!-- ============ PASS-THROUGH BRACKET ============ -->
+      <path d="M 806 222 L 814 222 L 814 490 L 806 490" stroke="var(--tester)" stroke-width="1.25" fill="none" opacity="0.65"/>
+      <text class="rail-label" transform="rotate(-90 848 356)" x="848" y="356" text-anchor="middle" fill="var(--tester)" opacity="0.85">PASSES THROUGH, IGNORED</text>
+
+      <!-- ============ LEGEND ============ -->
+      <line x1="170" y1="932" x2="890" y2="932" stroke="var(--line)" stroke-width="1"/>
+      <line x1="182" y1="962" x2="212" y2="962" stroke="var(--app)" stroke-width="2.5"/>
+      <text class="legend-t" x="222" y="966">App bot audio — enters at stage 1, consumed at stage 4</text>
+      <line x1="182" y1="988" x2="212" y2="988" stroke="var(--tester)" stroke-width="2" stroke-dasharray="5 7"/>
+      <text class="legend-t" x="222" y="992">Tester text — dashed while it passes through, solid once it is audio</text>
+    </svg>
+  </div>
+
+  <div class="notes">
+    <div class="note">
+      <h2>Why the names invert</h2>
+      <p>pipecat labels parties by <strong>direction</strong>. Whoever's audio comes <em>in</em> is the "user"; whoever the pipeline <em>speaks as</em> is the "bot" or "assistant".</p>
+      <p>In voicebox the incoming audio belongs to the <span class="app-tint">app bot under test</span>, so <code>user_aggregator</code> is the app bot's. The pipeline speaks as the <span class="tester-tint">tester</span>, so <code>assistant_aggregator</code> is ours.</p>
+      <p>Every stage above the empty slot serves the app bot. Every stage below it serves the tester.</p>
+    </div>
+
+    <div class="note">
+      <h2>Why tester text starts at the top</h2>
+      <p><code>queue_frames()</code> is pipecat's supported injection point and it enqueues at the <strong>source</strong> — there is no way to inject partway down.</p>
+      <p>So the tester's text walks past <code>vad</code>, <code>stt</code> and <code>user_aggregator</code> to reach the TTS. Those stages inspect it, match nothing, and forward it untouched.</p>
+      <p><strong>Traversing is not aggregating.</strong> The app bot's aggregator never accumulates the tester's words, and never gates them — it just hands them along.</p>
+    </div>
+
+    <div class="note">
+      <h2>Where the LLM went</h2>
+      <p>A normal pipecat pipeline puts an LLM between the two aggregators: it reads the assembled user context and emits the text the TTS will speak.</p>
+      <p>voicebox has no LLM in-process. Claude plays that part over MCP, so <code>speak()</code> hand-builds the same frame triplet the stage would have emitted — <code>LLMFullResponseStartFrame</code>, <code>LLMTextFrame</code>, <code>LLMFullResponseEndFrame</code>.</p>
+      <p>The app bot's aggregator still assembles a context, but nothing reads it.</p>
+    </div>
+  </div>
+
+  <div>
+    <h2>Where each event comes from</h2>
+    <div class="sources">
+      <div><dfn>app_bot_speech_*</dfn><span>VAD frames, seen by the pipeline observer. Instant and hardware-independent.</span></div>
+      <div><dfn>app_bot_transcript</dfn><span>The <code>TranscriptionFrame</code>, seen by the observer at the <code>stt</code> → <code>user_aggregator</code> hop. Arrives when Whisper finishes; the timestamp comes from the observer's own VAD log, not from any aggregator.</span></div>
+      <div><dfn>tester_speech_*</dfn><span>The tester's playout frames from the output transport.</span></div>
+      <div><dfn>tester_transcript</dfn><span>Emitted by <code>speak()</code> itself — ground truth, never round-tripped through STT.</span></div>
+    </div>
+  </div>
+
+  <footer>src/voicebox/agent.py · party naming :16-20 · stage order :1003-1011 · observer :169-201</footer>
+</div>

@@ -41,6 +41,7 @@ from pipecat.frames.frames import (
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMTextFrame,
+    TranscriptionFrame,
     TTSStoppedFrame,
     VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
@@ -52,7 +53,6 @@ from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
-    UserTurnStoppedMessage,
 )
 from pipecat.processors.audio.vad_processor import VADProcessor
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
@@ -89,7 +89,7 @@ from voicebox.processors.nonblocking_whisper_stt import (
 )
 from voicebox.raw_pcm_serializer import RawPCMSerializer
 from voicebox.runner_args import BrowserShimRunnerArguments
-from voicebox.timing import TimedSTTMixin, TimedTurnAnalyzerMixin, log_duration
+from voicebox.timing import TimedSTTMixin, TimedTurnAnalyzerMixin
 
 load_dotenv(override=True)
 
@@ -113,17 +113,6 @@ PLAYOUT_TIMEOUT_SECS = 30.0
 # that on top of the base. Mirrored (not imported) in server.py's IPC deadline,
 # which must outlive this window (D15).
 PLAYOUT_SECS_PER_WORD = 0.8
-
-# How long the aggregator's watchdog lets a user turn sit stopped-but-textless
-# before force-closing it. pipecat's 5 s default assumes streaming STT, where a
-# transcript trails speech by well under a second. Ours is batch Whisper on
-# CPU, and under load the decode approaches ~1x realtime (round 4 measured a
-# 116 s narration decoding for 108 s) — every time the watchdog fires first,
-# the turn closes empty and the late transcript re-emits as an orphan event
-# stamped at arrival time (rounds 1 and 4 both hit this). 240 s outlives the
-# 180 s drain cap, i.e. any decode the session would wait for at all; a
-# genuinely transcript-less turn still closes, just later.
-TURN_STOP_TIMEOUT_SECS = 240.0
 
 
 # The STT services are composed from two mixins, in this order:
@@ -183,6 +172,11 @@ class _PipelineEventObserver(BaseObserver):
         BotStoppedSpeakingFrame,
         InterruptionFrame,
         TTSStoppedFrame,
+        # The app bot's transcript, watched at the stt→user_aggregator hop.
+        # The aggregator CONSUMES final TranscriptionFrames and never pushes
+        # them on (pipecat llm_response_universal.py:696-700), but the push
+        # INTO it is downstream and therefore observable here.
+        TranscriptionFrame,
     )
 
     def __init__(self, agent: "PipecatMCPAgent"):
@@ -354,30 +348,33 @@ class PipecatMCPAgent:
             self._event_cond.notify_all()
         logger.debug(f"event: {event.type} @ {event.t:.3f}")
 
-    async def _emit_app_bot_transcript(self, text: str, aggregator_turn_started_at: str):
+    async def _emit_app_bot_transcript(self, text: str):
         """Emit a transcript, stamping the turn start from our own VAD log.
 
-        The aggregator's ``UserTurnStoppedMessage.timestamp`` is only right
-        when the turn was VAD-started. Under batch STT a monologue's later
-        chunks VAD-start while the previous chunk's transcript is still in
-        Whisper, so their turns are (re)opened by the transcript's own arrival
-        and the aggregator stamps *arrival* time — observed live off by up to
-        103 s. Our observer logs every VAD start; the earliest unclaimed one
-        is this transcript's true turn start.
+        Our observer logs every app-bot VAD start; the earliest unclaimed one
+        is this transcript's turn start. That log is the ONLY source: the app
+        bot's turn aggregator is not consulted, for timing (D10 — its stamp was
+        observed live off by up to 103 s) or for delivery (D24).
+
+        Starts and transcripts stay in lockstep because Whisper's ``run_stt``
+        yields at most one ``TranscriptionFrame`` per segment
+        (``pipecat/services/whisper/stt.py:377-386``, guarded by ``if text``)
+        and the STT worker is single and ordered — a segment with no transcript
+        to arrive claims its own start through the worker's outcome signal
+        instead (``_on_empty_segment`` / ``_on_failed_segment``).
 
         Args:
-            text: The transcribed utterance.
-            aggregator_turn_started_at: pipecat's ISO stamp, used only when no
-                unclaimed VAD start exists (should not happen in practice).
+            text: The transcribed utterance; ``""`` for a silent segment.
 
         """
-        if self._unclaimed_bot_speech_starts:
-            started = self._unclaimed_bot_speech_starts.popleft()
-            turn_started_at = datetime.fromtimestamp(started, tz=timezone.utc).isoformat(
-                timespec="milliseconds"
-            )
-        else:
-            turn_started_at = aggregator_turn_started_at
+        started = (
+            self._unclaimed_bot_speech_starts.popleft()
+            if self._unclaimed_bot_speech_starts
+            else time.time()
+        )
+        turn_started_at = datetime.fromtimestamp(started, tz=timezone.utc).isoformat(
+            timespec="milliseconds"
+        )
         await self._emit(
             TranscriptEvent(
                 text=text,
@@ -386,13 +383,43 @@ class PipecatMCPAgent:
             )
         )
 
+    async def _on_empty_segment(self):
+        """Report an app-bot segment Whisper recovered no text from.
+
+        Task F's "we tried and got nothing": an empty-flagged event tells a
+        reader that, where plain silence would read as "the app bot never
+        spoke". Whisper emits no frame at all for such a segment, so this
+        arrives from the STT worker rather than from the observer.
+
+        It also keeps ``_unclaimed_bot_speech_starts`` in lockstep: the silent
+        segment claims its own VAD start, so every later transcript still
+        claims its own rather than a neighbour's.
+        """
+        await self._emit_app_bot_transcript("")
+
+    async def _on_failed_segment(self):
+        """Retire the VAD start of a segment whose transcription failed.
+
+        No event: a failed decode is not something we heard, and pipecat
+        already reports the failure on its own error path (D25). But the
+        segment consumed a VAD start all the same — the observer logged one
+        when the app bot began that utterance, and no transcript will ever
+        arrive to claim it. Leaving it queued would hand it to the NEXT
+        transcript, and every transcript after that would be stamped with its
+        predecessor's turn start for the rest of the session (D26).
+        """
+        if self._unclaimed_bot_speech_starts:
+            self._unclaimed_bot_speech_starts.popleft()
+
     async def _on_pipeline_frame(self, frame: Frame):
         """Translate an observed pipeline frame into a log event.
 
-        pipecat's VAD "user" frames are the APP BOT (its audio is our input);
-        its "bot" speaking frames are the TESTER (our TTS playing out). VAD
-        frames carry a wall-clock ``timestamp`` (the VAD's emission instant);
-        the bot-speaking frames carry none, so those stamp at observation.
+        pipecat's VAD "user" frames and ``TranscriptionFrame`` are the APP BOT
+        (its audio is our input); the "bot" speaking frames are the TESTER (our
+        TTS playing out). VAD frames carry a wall-clock ``timestamp`` (the
+        VAD's emission instant); the others carry none, so those stamp at
+        observation — for a transcript that is when the decode finished, which
+        is the honest reading of "when we learned what was said".
         """
         if isinstance(frame, VADUserStartedSpeakingFrame):
             self._app_bot_speaking = True
@@ -405,6 +432,8 @@ class PipecatMCPAgent:
             await self._emit(
                 VoiceboxEvent(type=EventType.APP_BOT_SPEECH_STOPPED, t=frame.timestamp)
             )
+        elif isinstance(frame, TranscriptionFrame):
+            await self._emit_app_bot_transcript(frame.text)
         elif isinstance(frame, BotStartedSpeakingFrame):
             event = VoiceboxEvent(type=EventType.TESTER_SPEECH_STARTED)
             if self._playout is not None:
@@ -453,6 +482,8 @@ class PipecatMCPAgent:
             )
 
         stt = self._stt = self._create_stt_service()
+        stt.on_empty_segment = self._on_empty_segment
+        stt.on_failed_segment = self._on_failed_segment
         tts = self._create_tts_service()
         vad = self._create_vad_processor()
 
@@ -502,13 +533,9 @@ class PipecatMCPAgent:
             logger.info("Client disconnected")
             await self._emit(VoiceboxEvent(type=EventType.CLIENT_DISCONNECTED))
 
-        @user_aggregator.event_handler("on_user_turn_stopped")
-        async def on_user_turn_stopped(aggregator, strategy, message: UserTurnStoppedMessage):
-            with log_duration("on_user_turn_stopped"):
-                # Emitted even when Whisper recovered nothing (Task F): an
-                # empty-flagged event tells a reader "we tried and got
-                # nothing", where silence would read as "the bot never spoke".
-                await self._emit_app_bot_transcript(message.content or "", message.timestamp)
+        # No `on_user_turn_stopped` handler: the app bot's transcript is
+        # emitted by the observer the moment its TranscriptionFrame is pushed,
+        # so nothing consumes the aggregator's turn closure any more (D24).
 
         # Log header: consumers of app_bot_speech_stopped timings need the
         # built-in VAD lag to subtract it.
@@ -517,7 +544,9 @@ class PipecatMCPAgent:
                 vad_stop_secs=VAD_STOP_SECS,
                 note=(
                     "app_bot_speech_stopped.t lands ~vad_stop_secs after true "
-                    "speech end; app_bot_transcript arrives later still (batch STT)"
+                    "speech end; app_bot_transcript arrives later still (batch STT) "
+                    "and is emitted the moment the decode finishes — see "
+                    "transcription_lag_secs for how far behind this machine is"
                 ),
             )
         )
@@ -960,10 +989,10 @@ class PipecatMCPAgent:
         return LLMContextAggregatorPair(
             context,
             user_params=LLMUserAggregatorParams(
-                # Batch Whisper delivers the transcript long after the VAD
-                # stop; at the 5 s default the watchdog force-closed the turn
-                # first (see TURN_STOP_TIMEOUT_SECS).
-                user_turn_stop_timeout=TURN_STOP_TIMEOUT_SECS,
+                # No user_turn_stop_timeout override: pipecat's 5 s default
+                # applies to a turn nothing consumes. The app bot's transcript
+                # no longer rides on turn closure (D24), so no value here is
+                # compared against Whisper's decode speed.
                 user_turn_strategies=UserTurnStrategies(
                     # The "user" of this pipeline is the REMOTE BOT (its audio
                     # is our input). The default start strategies ship with
