@@ -21,6 +21,7 @@ User Interface on `:7860`). It knows nothing about voicebox; ground truth goes t
 | **2** | Dogfood S2–S4 live with voicebox against `http://localhost:7860` (round-trip events, turn-taking metrics with `record_dir`, barge-in); Whisper-CPU fix it surfaced | `751c4b9` | [t2-dogfood-s2-s4.md](../artefacts/feat-eval-fake-app/t2-dogfood-s2-s4.md) | ✅ |
 | **3** | `tests/eval/fake_app/README.md`; stale readme-app / `localhost:3000` reference cleanup in `README.md` + `CLAUDE.md` | `1d41070` | [t3-readme-and-cleanup.md](../artefacts/feat-eval-fake-app/t3-readme-and-cleanup.md) | ✅ |
 | **R1** | *Review fixes:* fail-fast key check at startup; `load_dotenv` precedence; duplicate-module `sys.path` insert dropped; ground-truth fd leak + CWD-relative path; `during_bot_speech` on `interrupted` records | `a328c81` | [t-r1-review-fixes.md](../artefacts/feat-eval-fake-app/t-r1-review-fixes.md) | ✅ |
+| **R2** | *Simplify fixes:* observer `cleanup()` override (supersedes R1's per-write open/close) + `session_ended` record; interrupted-reply flush; `handle_sigterm` forwarded; `itertools.cycle`; docstring de-dup | `69b251e` | [t-r2-simplify-fixes.md](../artefacts/feat-eval-fake-app/t-r2-simplify-fixes.md) | ✅ |
 
 Scenario S1 (fresh clone → real-mic conversation with Nova) is 🔴 manual — it needs Isabelle at
 the microphone and is **not** claimed verified by this branch until she runs it.
@@ -80,6 +81,11 @@ uv run python tests/eval/fake_app/bot.py
   `anthropic`/`openai` brains are code-verified only; live runs use `scripted` until a key
   lands in this repo's `.env`.
 - `ground_truth.jsonl` contents — observer only runs once a WebRTC client connects (Phase 2).
+- **Follow-up decision for Isabelle** (simplify-pass finding, spec-settled so not changed):
+  pipecat 1.3.0 ships a stock `pipecat.services.kokoro.tts.KokoroTTSService` (same upstream
+  code as voicebox's vendored copy, no new extra). Using it would decouple the reference
+  instrument's TTS from the system under test — today a Kokoro regression moves Nova and the
+  tester voice together and the ground truth can't see it. Details: R2 artefact.
 - **Follow-up decision for Isabelle** (review finding, `src/` out of scope this branch):
   `start_browser_session`'s default `url` in `src/voicebox/server.py:126` is still
   `http://localhost:3000`, which now points at nothing — change the default to `:7860` or make
