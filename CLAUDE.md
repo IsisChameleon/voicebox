@@ -91,6 +91,9 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
   `transcription_empty: true` event comes from the STT worker's `on_empty_segment` callback
   (`nonblocking_whisper_stt.py`) — and it must fire exactly once per silent segment, or the
   VAD-start deque that every transcript claims from drifts by one for the rest of the session.
+  A *failed* decode is not silence and must not fire it (D25): pipecat's Whisper services report
+  failure by **yielding an `ErrorFrame`**, not by raising (`whisper/stt.py:354-356`, and the MLX
+  catch-all at `:547-548`), so the worker's `except` never sees one — it counts them instead.
   The app-bot aggregator and `LocalSmartTurnAnalyzerV3` are now vestigial; removing them is a
   separate design pass (spec Phase 4), because tester frames still route *through* the aggregator.
 - **`record_dir` exists** (`runner_args.py`, `agent.py` `_dump_artifacts`): set it and `stop()` writes
