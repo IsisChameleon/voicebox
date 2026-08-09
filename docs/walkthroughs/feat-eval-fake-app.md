@@ -1,7 +1,7 @@
 # Walkthrough — `feat/eval-fake-app`
 
-*Status: **in progress**. Started 2026-08-09. Branched from `d07988b` (main, after PR #16 + #17
-merged).*
+*Status: **complete** (Phases 0–3; S1 real-mic run still pending Isabelle). 2026-08-09.
+Branched from `d07988b` (main, after PR #16 + #17 merged).*
 
 Adds a self-contained fake web voice app ("Nova", a space-exploration trivia host) under
 `tests/eval/fake_app/`, so anyone cloning the repo has a live conversational target for voicebox —
@@ -19,7 +19,7 @@ User Interface on `:7860`). It knows nothing about voicebox; ground truth goes t
 | **0** | Spec committed; walkthrough opened | `15d223b` | — | ✅ |
 | **1** | `pyproject` `eval` extra; `tests/eval/fake_app/{bot,brain}.py` + `prompt.md`; ground-truth JSONL observer; app serves prebuilt UI on `:7860` | `38184f4` | [t1-fake-app-phase1.md](../artefacts/feat-eval-fake-app/t1-fake-app-phase1.md) | ✅ |
 | **2** | Dogfood S2–S4 live with voicebox against `http://localhost:7860` (round-trip events, turn-taking metrics with `record_dir`, barge-in); Whisper-CPU fix it surfaced | `751c4b9` | [t2-dogfood-s2-s4.md](../artefacts/feat-eval-fake-app/t2-dogfood-s2-s4.md) | ✅ |
-| **3** | `tests/eval/fake_app/README.md`; stale readme-app / `localhost:3000` reference cleanup in `README.md` + `CLAUDE.md` | | | |
+| **3** | `tests/eval/fake_app/README.md`; stale readme-app / `localhost:3000` reference cleanup in `README.md` + `CLAUDE.md` | `1d41070` | [t3-readme-and-cleanup.md](../artefacts/feat-eval-fake-app/t3-readme-and-cleanup.md) | ✅ |
 
 Scenario S1 (fresh clone → real-mic conversation with Nova) is 🔴 manual — it needs Isabelle at
 the microphone and is **not** claimed verified by this branch until she runs it.
