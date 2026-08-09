@@ -777,3 +777,39 @@ missing signal.
 segment 1, and asserts the transcript from segment 2 carries segment 2's start
 (`tests/test_nonblocking_stt.py::test_failed_segment_leaves_the_next_transcripts_vad_start_alone`).
 A worker-level test cannot see this class of bug at all.
+
+## D27 — Fake voice app for dogfooding & eval ("Nova")
+
+*2026-08-09. Branch `feat/eval-fake-app`. Design session recorded in
+`docs/specs/2026-08-09-demo-voice-app-for-dogfooding.md` (DRAFT v2, decisions
+1–4 resolved with Isabelle before implementation started).*
+
+**Context:** voicebox's end-to-end behaviour can only be proven against a live
+web voice app. The old "readme app" on `localhost:3000` no longer exists;
+EmberTales is external, buggy, credentialed. A fresh clone has no app to point
+voicebox at.
+
+**Decided:**
+
+- A self-contained fake voice app in-repo: a plain pipecat pipeline behind
+  pipecat's development runner (SmallWebRTC + prebuilt UI on `:7860`). The app
+  knows nothing about voicebox — voicebox drives it like any third-party app.
+- **Location `tests/eval/fake_app/`** — it is a test fixture, and `tests/eval/`
+  is the umbrella where the future eval harness lands beside it. pytest never
+  collects `bot.py` (only `test_*.py`); ruff `tests/**` ignores apply.
+- **Dependency extra named `eval`** (`pipecat-ai[webrtc,anthropic]>=1.3.0`) —
+  it will accumulate the eval harness's deps too; keeps aiortc/anthropic out of
+  the core install.
+- Persona "Nova", space-trivia host, Kokoro voice `am_michael` (audibly distinct
+  from the tester's `af_heart` in recordings). Short structured turns for clean
+  turn-taking metrics; "explain in detail" yields a long utterance for barge-in
+  tests. Prompt in `prompt.md`, not code.
+- **Eval-readiness built into v1** (cheap now, expensive to retrofit): a
+  ground-truth JSONL observer (`temp/fake_app/ground_truth.jsonl`) making the
+  fake a reference instrument, and a swappable "brain" seam
+  (`VOICEBOX_FAKE_APP_LLM_PROVIDER=anthropic|openai|scripted`) so evals get
+  determinism and key-free runs.
+
+**Rejected:** hosting it as a product demo outside `tests/` (it's a fixture);
+a local-LLM fallback in v1; test-harness features inside the app (voicebox is
+the harness — the app must stay "any web voice app", no cheating channel).
