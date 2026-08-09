@@ -17,7 +17,7 @@ User Interface on `:7860`). It knows nothing about voicebox; ground truth goes t
 | Phase | What it changes | Commits | Evidence | Done |
 |---|---|---|---|---|
 | **0** | Spec committed; walkthrough opened | `15d223b` | — | ✅ |
-| **1** | `pyproject` `eval` extra; `tests/eval/fake_app/{bot,brain}.py` + `prompt.md`; ground-truth JSONL observer; app serves prebuilt UI on `:7860` | | | |
+| **1** | `pyproject` `eval` extra; `tests/eval/fake_app/{bot,brain}.py` + `prompt.md`; ground-truth JSONL observer; app serves prebuilt UI on `:7860` | `38184f4` | [t1-fake-app-phase1.md](../artefacts/feat-eval-fake-app/t1-fake-app-phase1.md) | ✅ |
 | **2** | Dogfood S2–S4 live with voicebox against `http://localhost:7860` (round-trip events, turn-taking metrics with `record_dir`, barge-in) | | | |
 | **3** | `tests/eval/fake_app/README.md`; stale readme-app / `localhost:3000` reference cleanup in `README.md` + `CLAUDE.md` | | | |
 
@@ -33,6 +33,28 @@ uv run python tests/eval/fake_app/bot.py
 # then open http://localhost:7860 and click Connect
 ```
 
+## Phase 1 notes
+
+- Pipeline: `SmallWebRTCTransport → VADProcessor(Silero) → WhisperSTTService → user aggregator →
+  brain → KokoroTTSService(voice_id="am_michael") → transport.output() → assistant aggregator`
+  (`tests/eval/fake_app/bot.py:137-148`). All pipecat 1.3.0 API names verified against the
+  installed package (`InterruptionFrame`, not the removed `StartInterruptionFrame`;
+  `PipelineWorker` + `WorkerRunner`).
+- Brain seam (`tests/eval/fake_app/brain.py`): `create_brain()` picks by
+  `VOICEBOX_FAKE_APP_LLM_PROVIDER`; `scripted` plays 5 canned lines (line 3 is a deliberately
+  long Luna 9 monologue for barge-in tests); missing key → `SystemExit` with a clear message.
+- Ground truth: `GroundTruthObserver` appends JSONL to `temp/fake_app/ground_truth.jsonl` —
+  `bot_speech_started/stopped`, `heard_user`, `brain_reply`, `interrupted`. Disk only.
+- Implementation choices the spec left open (flagged, not silently decided): openai with no
+  model env falls through to pipecat's own default; pipecat broadcasts `InterruptionFrame` on
+  every user turn start, so `interrupted` records are real barge-ins only inside bot speech
+  spans (noted in the observer docstring); ground-truth path is cwd-relative (run from repo
+  root); no Kokoro `warm_up()` (cold start only delays the first greeting).
+
 ## Not covered (running list)
 
 - S1 real-mic run — pending Isabelle.
+- `ANTHROPIC_API_KEY` absent from this environment (no `.env` in the repo): the
+  `anthropic`/`openai` brains are code-verified only; live runs use `scripted` until a key
+  lands in this repo's `.env`.
+- `ground_truth.jsonl` contents — observer only runs once a WebRTC client connects (Phase 2).
