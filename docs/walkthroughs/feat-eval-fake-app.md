@@ -20,6 +20,7 @@ User Interface on `:7860`). It knows nothing about voicebox; ground truth goes t
 | **1** | `pyproject` `eval` extra; `tests/eval/fake_app/{bot,brain}.py` + `prompt.md`; ground-truth JSONL observer; app serves prebuilt UI on `:7860` | `38184f4` | [t1-fake-app-phase1.md](../artefacts/feat-eval-fake-app/t1-fake-app-phase1.md) | ✅ |
 | **2** | Dogfood S2–S4 live with voicebox against `http://localhost:7860` (round-trip events, turn-taking metrics with `record_dir`, barge-in); Whisper-CPU fix it surfaced | `751c4b9` | [t2-dogfood-s2-s4.md](../artefacts/feat-eval-fake-app/t2-dogfood-s2-s4.md) | ✅ |
 | **3** | `tests/eval/fake_app/README.md`; stale readme-app / `localhost:3000` reference cleanup in `README.md` + `CLAUDE.md` | `1d41070` | [t3-readme-and-cleanup.md](../artefacts/feat-eval-fake-app/t3-readme-and-cleanup.md) | ✅ |
+| **R1** | *Review fixes:* fail-fast key check at startup; `load_dotenv` precedence; duplicate-module `sys.path` insert dropped; ground-truth fd leak + CWD-relative path; `during_bot_speech` on `interrupted` records | `a328c81` | [t-r1-review-fixes.md](../artefacts/feat-eval-fake-app/t-r1-review-fixes.md) | ✅ |
 
 Scenario S1 (fresh clone → real-mic conversation with Nova) is 🔴 manual — it needs Isabelle at
 the microphone and is **not** claimed verified by this branch until she runs it.
@@ -46,10 +47,9 @@ uv run python tests/eval/fake_app/bot.py
 - Ground truth: `GroundTruthObserver` appends JSONL to `temp/fake_app/ground_truth.jsonl` —
   `bot_speech_started/stopped`, `heard_user`, `brain_reply`, `interrupted`. Disk only.
 - Implementation choices the spec left open (flagged, not silently decided): openai with no
-  model env falls through to pipecat's own default; pipecat broadcasts `InterruptionFrame` on
-  every user turn start, so `interrupted` records are real barge-ins only inside bot speech
-  spans (noted in the observer docstring); ground-truth path is cwd-relative (run from repo
-  root); no Kokoro `warm_up()` (cold start only delays the first greeting).
+  model env falls through to pipecat's own default; no Kokoro `warm_up()` (cold start only
+  delays the first greeting). Two more Phase-1 choices — cwd-relative ground-truth path and
+  bare `interrupted` records — were superseded by review fixes (see R1 row).
 
 ## Phase 2 notes (live dogfood, scripted brain — no API key in this environment)
 
@@ -80,3 +80,10 @@ uv run python tests/eval/fake_app/bot.py
   `anthropic`/`openai` brains are code-verified only; live runs use `scripted` until a key
   lands in this repo's `.env`.
 - `ground_truth.jsonl` contents — observer only runs once a WebRTC client connects (Phase 2).
+- **Follow-up decision for Isabelle** (review finding, `src/` out of scope this branch):
+  `start_browser_session`'s default `url` in `src/voicebox/server.py:126` is still
+  `http://localhost:3000`, which now points at nothing — change the default to `:7860` or make
+  `url` required. Note the MCP tool-description client cache when changing it.
+- Review skip, recorded: the fake constructs its models per WebRTC connection (pipecat's
+  canonical example shape) — first cold connect blocks the runner's event loop while models
+  load; revisit only if connect timeouts appear in practice.
