@@ -47,3 +47,6 @@ whisker_setup.py
 # Scratch dir for all run artifacts: dogfood + e2e recordings (WAVs, PNGs,
 # events.json, run logs). Everything here is throwaway — never committed.
 temp/
+
+# Codex CLI local config (personal tool settings, not repo policy)
+.codex/

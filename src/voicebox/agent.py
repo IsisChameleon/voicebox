@@ -359,8 +359,9 @@ class PipecatMCPAgent:
         Starts and transcripts stay in lockstep because Whisper's ``run_stt``
         yields at most one ``TranscriptionFrame`` per segment
         (``pipecat/services/whisper/stt.py:377-386``, guarded by ``if text``)
-        and the STT worker is single and ordered — a silent segment claims its
-        own start via the empty-segment signal.
+        and the STT worker is single and ordered — a segment with no transcript
+        to arrive claims its own start through the worker's outcome signal
+        instead (``_on_empty_segment`` / ``_on_failed_segment``).
 
         Args:
             text: The transcribed utterance; ``""`` for a silent segment.
@@ -395,6 +396,20 @@ class PipecatMCPAgent:
         claims its own rather than a neighbour's.
         """
         await self._emit_app_bot_transcript("")
+
+    async def _on_failed_segment(self):
+        """Retire the VAD start of a segment whose transcription failed.
+
+        No event: a failed decode is not something we heard, and pipecat
+        already reports the failure on its own error path (D25). But the
+        segment consumed a VAD start all the same — the observer logged one
+        when the app bot began that utterance, and no transcript will ever
+        arrive to claim it. Leaving it queued would hand it to the NEXT
+        transcript, and every transcript after that would be stamped with its
+        predecessor's turn start for the rest of the session (D26).
+        """
+        if self._unclaimed_bot_speech_starts:
+            self._unclaimed_bot_speech_starts.popleft()
 
     async def _on_pipeline_frame(self, frame: Frame):
         """Translate an observed pipeline frame into a log event.
@@ -468,6 +483,7 @@ class PipecatMCPAgent:
 
         stt = self._stt = self._create_stt_service()
         stt.on_empty_segment = self._on_empty_segment
+        stt.on_failed_segment = self._on_failed_segment
         tts = self._create_tts_service()
         vad = self._create_vad_processor()
 

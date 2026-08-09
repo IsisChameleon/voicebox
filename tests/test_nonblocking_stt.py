@@ -18,6 +18,8 @@ from pipecat.services.stt_service import SegmentedSTTService
 from pipecat.utils.time import time_now_iso8601
 from pipecat.workers.runner import WorkerRunner
 
+from voicebox.agent import PipecatMCPAgent, _PipelineEventObserver
+from voicebox.events import EventType
 from voicebox.processors.nonblocking_whisper_stt import (
     EagerSegmentsWhisperModel,
     NonBlockingSegmentedSTT,
@@ -93,11 +95,13 @@ class _Downstream(FrameProcessor):
 class _Harness:
     """A running pipeline of [stt, downstream] that can be fed speech segments."""
 
-    def __init__(self, stt: SegmentedSTTService):
+    def __init__(self, stt: SegmentedSTTService, observers: list | None = None):
         self.stt = stt
         self.downstream = _Downstream()
         self._worker = PipelineWorker(
-            Pipeline([stt, self.downstream]), cancel_on_idle_timeout=False
+            Pipeline([stt, self.downstream]),
+            cancel_on_idle_timeout=False,
+            observers=observers,
         )
         self._runner = WorkerRunner(handle_sigterm=False)
 
@@ -113,9 +117,18 @@ class _Harness:
         await self._worker.stop_when_done()
         await self._run_task
 
-    async def speech_segment(self, secs: float = 1.0):
-        """Feed one VAD-delimited utterance, closing it so the STT cuts a segment."""
-        await self._worker.queue_frame(VADUserStartedSpeakingFrame())
+    async def speech_segment(self, secs: float = 1.0, started_at: float | None = None):
+        """Feed one VAD-delimited utterance, closing it so the STT cuts a segment.
+
+        ``started_at`` stamps the VAD start frame, which is what the agent's
+        observer reads as the utterance's turn start.
+        """
+        start = (
+            VADUserStartedSpeakingFrame()
+            if started_at is None
+            else VADUserStartedSpeakingFrame(timestamp=started_at)  # type: ignore[call-arg]
+        )
+        await self._worker.queue_frame(start)
         for _ in range(round(secs / 0.1)):
             await self._worker.queue_frame(InputAudioRawFrame(b"\x11" * CHUNK, RATE, 1))
         await self._worker.queue_frame(VADUserStoppedSpeakingFrame())
@@ -319,12 +332,17 @@ async def test_error_frame_is_not_an_empty_segment():
     # in the session is attributed to the wrong turn.
     stt = _NonBlockingErrorFrameSTT(failing_segments={1})
     empties: list[int] = []
+    failures: list[int] = []
     errors: list[ErrorFrame] = []
 
     async def on_empty():
         empties.append(1)
 
+    async def on_failed():
+        failures.append(1)
+
     stt.on_empty_segment = on_empty
+    stt.on_failed_segment = on_failed
     # push_error_frame fires "on_error" and pushes UPSTREAM (frame_processor.py:688,700),
     # so the ErrorFrame never reaches a downstream processor — this handler is where
     # pipecat's own error path is observable.
@@ -337,11 +355,64 @@ async def test_error_frame_is_not_an_empty_segment():
         await asyncio.sleep(0.5)
 
         assert empties == [], "a failed transcription must not signal an empty segment"
+        # But it must signal SOMETHING, exactly once: the failed segment still
+        # consumed a VAD start that no transcript will ever arrive to claim.
+        assert len(failures) == 1, f"expected one failure signal, got {len(failures)}"
         assert [e.error for e in errors] == ["whisper failed"], (
             "the ErrorFrame must still travel pipecat's error path"
         )
         # And the worker survives it: the next segment still transcribes.
         assert h.downstream.texts() == ["segment-2"]
+
+
+async def test_raised_failure_signals_the_same_as_an_error_frame():
+    # The two ways Whisper can fail differ only in how pipecat reports them;
+    # to the segment they are one outcome. A raised failure that signalled
+    # nothing would drift the VAD-start correlation exactly as an unsignalled
+    # ErrorFrame does.
+    stt = _NonBlockingExplodingSTT()
+    empties: list[int] = []
+    failures: list[int] = []
+
+    async def on_empty():
+        empties.append(1)
+
+    async def on_failed():
+        failures.append(1)
+
+    stt.on_empty_segment = on_empty
+    stt.on_failed_segment = on_failed
+
+    async with _Harness(stt) as h:
+        await h.speech_segment()
+        await asyncio.sleep(0.5)
+
+        assert failures == [1] and empties == []
+
+
+async def test_failed_segment_leaves_the_next_transcripts_vad_start_alone():
+    # The end-to-end story behind the two signals, through the real agent: the
+    # observer logs one VAD start per utterance and each transcript claims the
+    # earliest unclaimed one. A failed segment that left its start behind would
+    # hand it to the NEXT transcript, and every transcript after that would
+    # carry its predecessor's turn start for the rest of the session (D26).
+    stt = _NonBlockingErrorFrameSTT(failing_segments={1})
+    agent = PipecatMCPAgent(transport=None)  # type: ignore[arg-type]
+    # Exactly the wiring agent.start() does.
+    stt.on_empty_segment = agent._on_empty_segment
+    stt.on_failed_segment = agent._on_failed_segment
+
+    async with _Harness(stt, observers=[_PipelineEventObserver(agent)]) as h:
+        await h.speech_segment(started_at=100.0)  # Whisper fails this one
+        await asyncio.sleep(0.5)
+        await h.speech_segment(started_at=200.0)  # ...and transcribes this one
+        await asyncio.sleep(0.5)
+
+    transcripts = [e for e in agent._events if e.type == EventType.APP_BOT_TRANSCRIPT]
+    assert [t.text for t in transcripts] == ["segment-2"]  # type: ignore[attr-defined]
+    # 200.0, its own start — not 100.0, the failed segment's.
+    assert transcripts[0].turn_started_at == "1970-01-01T00:03:20.000+00:00"  # type: ignore[attr-defined]
+    assert list(agent._unclaimed_bot_speech_starts) == []
 
 
 async def test_empty_segment_signal_is_optional():

@@ -115,14 +115,21 @@ class NonBlockingSegmentedSTT(SegmentedSTTService):
     def __init__(self, **kwargs):
         """Initialize the queue; the worker starts with the pipeline."""
         super().__init__(**kwargs)
-        # Called once per segment that came back with neither a transcript nor
-        # an error — i.e. Whisper ran and recovered no text. Whisper
-        # yields nothing at all for a segment it recovers no text from
-        # (pipecat/services/whisper/stt.py:377, `if text:`), so this worker is
-        # the only place that knows the difference between "we tried and got
-        # nothing" and "the app bot never spoke" — there is no frame for a
-        # reader downstream to see. Set by the agent; None leaves it silent.
+        # EVERY segment that produces no TranscriptionFrame calls exactly one of
+        # these, because the agent correlates one VAD start per segment and a
+        # segment that ends without telling it drifts every later transcript by
+        # one interval (D26). Whisper yields nothing at all for a segment it
+        # recovers no text from (pipecat/services/whisper/stt.py:377, `if
+        # text:`), so this worker is the only place that can see the outcome —
+        # there is no frame for a reader downstream to look at.
+        #   on_empty_segment  — ran, recovered no text ("we tried and got
+        #                       nothing", as opposed to "the app bot never
+        #                       spoke"): the agent emits an empty transcript.
+        #   on_failed_segment — the decode failed (ErrorFrame or exception):
+        #                       no event, but the VAD start still has to go.
+        # Set by the agent; None leaves the worker silent.
         self.on_empty_segment: Callable[[], Awaitable[None]] | None = None
+        self.on_failed_segment: Callable[[], Awaitable[None]] | None = None
         self._segments: asyncio.Queue[bytes] = asyncio.Queue()
         # Enqueue times, popped in lockstep with the queue by the single
         # worker. They are what makes the backlog reportable as an age rather
@@ -210,25 +217,36 @@ class NonBlockingSegmentedSTT(SegmentedSTTService):
         while True:
             audio = await self._segments.get()
             self._in_flight_since = self._waiting_since.popleft()
+            transcripts = errors = 0
             try:
                 # Wrapping the generator rather than iterating it here keeps
                 # pipecat's own push semantics (ErrorFrame → push_error_frame)
                 # as the only thing that forwards frames.
-                transcripts = errors = 0
                 await self.process_generator(counting(super().run_stt(audio)))  # type: ignore
-                # A failure is not silence. pipecat's Whisper services report a
-                # failed transcription by YIELDING an ErrorFrame rather than
-                # raising (`whisper/stt.py:355` model-missing,
-                # `whisper/stt.py:547` the MLX catch-all), so the `except` below
-                # never sees it. Counting the ErrorFrame is what keeps a broken
-                # segment from being reported as `transcription_empty: true` and
-                # claiming a VAD-start timestamp that a later transcript needs.
-                if not transcripts and not errors and self.on_empty_segment is not None:
-                    await self.on_empty_segment()
             except Exception as e:
                 # A failed segment must not kill the worker: every later
-                # transcript in the session would be lost with it.
+                # transcript in the session would be lost with it. A raised
+                # failure and a yielded ErrorFrame are the same outcome to the
+                # segment, so they take the same branch below.
+                errors += 1
                 logger.error(f"{self}: transcription failed, segment dropped: {e}")
+            try:
+                # A failure is not silence, but both consumed a segment. pipecat's
+                # Whisper services report a failed transcription by YIELDING an
+                # ErrorFrame rather than raising (`whisper/stt.py:355`
+                # model-missing, `whisper/stt.py:547` the MLX catch-all), so the
+                # `except` above never sees it — `counting` does. Splitting the two
+                # keeps a broken segment from being reported as
+                # `transcription_empty: true`; signalling BOTH keeps it from
+                # silently leaving behind the VAD start a later transcript claims.
+                # A transcript needs no signal: it claims its own start on arrival.
+                if not transcripts:
+                    signal = self.on_failed_segment if errors else self.on_empty_segment
+                    if signal is not None:
+                        await signal()
+            except Exception as e:
+                # Same reason as above: nothing a consumer does may kill the worker.
+                logger.error(f"{self}: segment-outcome callback failed: {e}")
             finally:
                 self._in_flight_since = None
                 self._pending_audio_bytes -= len(audio)

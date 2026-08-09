@@ -719,3 +719,61 @@ utterance it belongs to was never transcribed, so no transcript should claim it.
 decode that failed for an unknown reason, in-order, on the single worker, risks
 stalling every later segment behind it; the drain budget
 (`DRAIN_BASE_SECS`/`DRAIN_CAP_SECS`) is sized for one pass over the backlog.
+
+## D26 — A failed segment still has to retire its VAD start
+
+*2026-08-09. Branch `fix/decouple-transcript-delivery`. Corrects the last
+paragraph of D25; found by review of the D25 fix, not by a failure in the
+field.*
+
+**Context:** D25 stopped a failed segment from being reported as
+`transcription_empty: true`, and reasoned that "the VAD start stays unclaimed,
+which is correct: the utterance it belongs to was never transcribed, so no
+transcript should claim it." That is right about *whose* start it is and wrong
+about what happens to it. `_unclaimed_bot_speech_starts` is a FIFO the observer
+appends to once per app-bot VAD start, and `_emit_app_bot_transcript`
+unconditionally pops the oldest entry (`agent.py:369-373`). Leaving the failed
+segment's start at the head does not park it — it hands it to the next
+transcript:
+
+| # | segment | VAD start logged | deque | transcript stamped |
+|---|---|---|---|---|
+| 1 | Whisper `ErrorFrame` | 100 | `[100]` | — |
+| 2 | "hello" | 200 | `[100, 200]` | **100** ❌ |
+
+and every later transcript in the session keeps that one-interval offset. So
+D25 moved the drift from the empty-signal door to the error door rather than
+closing it. The D25 test proves the worker's *classification* and never reaches
+the agent, which is why it passed.
+
+**Decided:** the invariant is per-segment, not per-outcome — **every segment
+that yields no `TranscriptionFrame` signals the agent exactly once**, and the
+signal says which outcome it was. `on_failed_segment` joins `on_empty_segment`
+on the STT worker; the agent's handler pops one start and emits nothing
+(`agent.py:_on_failed_segment`). A transcript needs no signal: it claims its own
+start on arrival. Writing it as one branch in the worker
+(`nonblocking_whisper_stt.py:210-245`) is what makes "a third outcome forgets to
+tell the agent" un-writable rather than merely fixed: the choice is *which*
+signal, never *whether*.
+
+A raised exception takes the failure branch too. D25 left it alone ("keeps its
+existing handling"), but a raise drops a segment exactly as an `ErrorFrame` does
+and drifted the deque identically — the same bug through a third door.
+
+**Rejected — one typed `on_segment_complete(outcome)` callback** in place of the
+two. It reads better in the abstract and would scale to a fourth outcome, but it
+buys nothing today (two producers, two consumers, no shared body) and costs an
+enum in the STT module that the agent has to switch on. Revisit if a third
+non-transcript outcome ever appears.
+
+**Rejected — making the agent tolerate drift instead** (e.g. matching
+transcripts to starts by timestamp proximity rather than by order). The FIFO is
+correct *because* the STT worker is single and ordered (D10); a fuzzy match
+would trade a provable invariant for a heuristic in order to paper over a
+missing signal.
+
+**Test debt this closes:** the regression test now drives the real
+`_PipelineEventObserver` and the real agent over a pipeline whose Whisper fails
+segment 1, and asserts the transcript from segment 2 carries segment 2's start
+(`tests/test_nonblocking_stt.py::test_failed_segment_leaves_the_next_transcripts_vad_start_alone`).
+A worker-level test cannot see this class of bug at all.
