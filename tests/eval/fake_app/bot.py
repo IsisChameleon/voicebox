@@ -138,7 +138,13 @@ async def bot(runner_args: RunnerArguments):
         [
             transport.input(),
             VADProcessor(vad_analyzer=SileroVADAnalyzer()),
-            WhisperSTTService(settings=WhisperSTTService.Settings(model=STT_MODEL)),
+            WhisperSTTService(
+                settings=WhisperSTTService.Settings(model=STT_MODEL),
+                # "auto" picks CUDA whenever ctranslate2 sees a GPU; on machines
+                # without CUDA libs (e.g. WSL2) that dies with "libcublas.so.12
+                # not found" on the first segment. CPU is the portable choice.
+                device="cpu",
+            ),
             aggregators.user(),
             create_brain(),
             KokoroTTSService(voice_id="am_michael"),
