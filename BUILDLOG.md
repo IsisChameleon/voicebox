@@ -677,3 +677,45 @@ machinery than a one-consumer, one-producer signal earns.
 delivery moves, but removing them changes the route tester frames take (they
 currently traverse the app-bot aggregator on their way to the TTS), so the blast
 radius reaches the tester side. It gets its own design pass once this lands.
+
+## D25 — A failed transcription is not a silent segment
+
+*2026-08-09. Branch `fix/decouple-transcript-delivery`. Refines D24 (Phase 2);
+found by review of the branch diff, not by a failure in the field.*
+
+**Context:** D24 moved the "we tried and got nothing" signal onto the STT
+worker, which fired `on_empty_segment` whenever a segment produced no
+`TranscriptionFrame`. That test — *no transcript* — is broader than the
+condition it was meant to detect. pipecat's Whisper services report a **failed**
+transcription by *yielding* an `ErrorFrame` rather than raising: the MLX service
+wraps its whole body in `except Exception: yield ErrorFrame(...)`
+(`pipecat/services/whisper/stt.py:547-548`) and the faster-whisper service
+yields one when the model is missing (`:354-356`). Neither reaches the worker's
+`except Exception`, so a broken decode was indistinguishable from silence. The
+cost is not a cosmetic mislabel: `_on_empty_segment` claims one entry from
+`_unclaimed_bot_speech_starts`, so a failed segment consumed a VAD start it
+never earned and **every later transcript in the session** was stamped with a
+neighbour's — the D10 deque drift D24's Phase 2 exists to prevent, re-entering
+through the error door.
+
+**Decided:** the empty signal fires only when the run produced **neither** a
+transcript **nor** an error. The existing pass-through wrapper already sees
+every frame, so it counts `ErrorFrame`s alongside `TranscriptionFrame`s and the
+condition gains one term (`nonblocking_whisper_stt.py:196-227`). Three outcomes,
+three behaviours: transcript → event; error → pipecat's error path only, no
+event, no VAD start claimed; nothing at all → `transcription_empty`. Raised
+exceptions keep their existing handling (log, drop the segment, keep the worker
+alive) — the worker survives an `ErrorFrame` run for free, since nothing throws.
+
+**Rejected — treating the error as its own `listen()` event** (an
+`app_bot_transcription_failed`, say). It would need a party, a place in
+`events.py`, and a consumer; no caller has asked to distinguish "Whisper broke"
+from "the app bot said nothing we could hear", and pipecat already surfaces the
+failure on its own error path. Silence in the event log is the honest answer
+until a consumer exists. The VAD start stays unclaimed, which is correct: the
+utterance it belongs to was never transcribed, so no transcript should claim it.
+
+**Rejected — catching the `ErrorFrame` and retrying the segment.** Retrying a
+decode that failed for an unknown reason, in-order, on the single worker, risks
+stalling every later segment behind it; the drain budget
+(`DRAIN_BASE_SECS`/`DRAIN_CAP_SECS`) is sized for one pass over the backlog.

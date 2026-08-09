@@ -45,6 +45,7 @@ from loguru import logger
 from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
+    ErrorFrame,
     Frame,
     StartFrame,
     TranscriptionFrame,
@@ -114,7 +115,8 @@ class NonBlockingSegmentedSTT(SegmentedSTTService):
     def __init__(self, **kwargs):
         """Initialize the queue; the worker starts with the pipeline."""
         super().__init__(**kwargs)
-        # Called once per segment that produced no TranscriptionFrame. Whisper
+        # Called once per segment that came back with neither a transcript nor
+        # an error — i.e. Whisper ran and recovered no text. Whisper
         # yields nothing at all for a segment it recovers no text from
         # (pipecat/services/whisper/stt.py:377, `if text:`), so this worker is
         # the only place that knows the difference between "we tried and got
@@ -193,13 +195,16 @@ class NonBlockingSegmentedSTT(SegmentedSTTService):
     async def _transcribe_worker(self):
         """Transcribe queued segments one at a time, in the order spoken."""
         transcripts = 0
+        errors = 0
 
         async def counting(source: AsyncGenerator[Frame, None]) -> AsyncGenerator[Frame, None]:
-            """Pass every frame through untouched, counting the transcripts."""
-            nonlocal transcripts
+            """Pass every frame through untouched, counting what came out."""
+            nonlocal transcripts, errors
             async for frame in source:
                 if isinstance(frame, TranscriptionFrame):
                     transcripts += 1
+                elif isinstance(frame, ErrorFrame):
+                    errors += 1
                 yield frame
 
         while True:
@@ -209,9 +214,16 @@ class NonBlockingSegmentedSTT(SegmentedSTTService):
                 # Wrapping the generator rather than iterating it here keeps
                 # pipecat's own push semantics (ErrorFrame → push_error_frame)
                 # as the only thing that forwards frames.
-                transcripts = 0
+                transcripts = errors = 0
                 await self.process_generator(counting(super().run_stt(audio)))  # type: ignore
-                if not transcripts and self.on_empty_segment is not None:
+                # A failure is not silence. pipecat's Whisper services report a
+                # failed transcription by YIELDING an ErrorFrame rather than
+                # raising (`whisper/stt.py:355` model-missing,
+                # `whisper/stt.py:547` the MLX catch-all), so the `except` below
+                # never sees it. Counting the ErrorFrame is what keeps a broken
+                # segment from being reported as `transcription_empty: true` and
+                # claiming a VAD-start timestamp that a later transcript needs.
+                if not transcripts and not errors and self.on_empty_segment is not None:
                     await self.on_empty_segment()
             except Exception as e:
                 # A failed segment must not kill the worker: every later

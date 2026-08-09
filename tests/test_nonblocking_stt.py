@@ -3,6 +3,7 @@ import time
 from collections.abc import AsyncGenerator
 
 from pipecat.frames.frames import (
+    ErrorFrame,
     Frame,
     InputAudioRawFrame,
     LLMTextFrame,
@@ -280,6 +281,67 @@ async def test_empty_segment_signals_once_and_only_when_silent():
 
         assert h.downstream.texts() == ["segment-1", "segment-3"]
         assert len(empties) == 1, f"expected one empty signal, got {len(empties)}"
+
+
+class _ErrorFrameSTT(SegmentedSTTService):
+    """Stands in for Whisper failing a segment WITHOUT raising.
+
+    pipecat's Whisper services report a failed transcription by yielding an
+    ``ErrorFrame`` — ``whisper/stt.py:355`` when the model is missing, and the
+    MLX service's catch-all ``except Exception`` at ``whisper/stt.py:547``,
+    which swallows the exception and yields instead. So a failure never reaches
+    the worker's ``except``.
+    """
+
+    def __init__(self, failing_segments: set[int], **kwargs):
+        super().__init__(**kwargs)
+        self.failing_segments = failing_segments
+        self.segments_seen = 0
+
+    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
+        """Yield one transcript, or only an ErrorFrame for a failing segment."""
+        self.segments_seen += 1
+        if self.segments_seen in self.failing_segments:
+            yield ErrorFrame(error="whisper failed")
+            return
+        yield TranscriptionFrame(f"segment-{self.segments_seen}", "", time_now_iso8601())
+
+
+class _NonBlockingErrorFrameSTT(NonBlockingSegmentedSTT, _ErrorFrameSTT):
+    """The production composition over a Whisper that fails by ErrorFrame."""
+
+
+async def test_error_frame_is_not_an_empty_segment():
+    # A failed transcription is not silence. If the worker counts only
+    # transcripts, an ErrorFrame run looks identical to a silent one and gets
+    # reported as `transcription_empty: true` — consuming the VAD-start
+    # timestamp that the NEXT real transcript needs, so every later transcript
+    # in the session is attributed to the wrong turn.
+    stt = _NonBlockingErrorFrameSTT(failing_segments={1})
+    empties: list[int] = []
+    errors: list[ErrorFrame] = []
+
+    async def on_empty():
+        empties.append(1)
+
+    stt.on_empty_segment = on_empty
+    # push_error_frame fires "on_error" and pushes UPSTREAM (frame_processor.py:688,700),
+    # so the ErrorFrame never reaches a downstream processor — this handler is where
+    # pipecat's own error path is observable.
+    stt.add_event_handler("on_error", lambda _proc, frame: errors.append(frame))
+
+    async with _Harness(stt) as h:
+        await h.speech_segment()
+        await asyncio.sleep(0.5)
+        await h.speech_segment()
+        await asyncio.sleep(0.5)
+
+        assert empties == [], "a failed transcription must not signal an empty segment"
+        assert [e.error for e in errors] == ["whisper failed"], (
+            "the ErrorFrame must still travel pipecat's error path"
+        )
+        # And the worker survives it: the next segment still transcribes.
+        assert h.downstream.texts() == ["segment-2"]
 
 
 async def test_empty_segment_signal_is_optional():
