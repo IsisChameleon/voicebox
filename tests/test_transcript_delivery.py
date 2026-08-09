@@ -1,19 +1,16 @@
-"""Q4 of the D24 spec, against a real pipeline rather than by reading pipecat.
-
-The app bot's transcript is now delivered by the pipeline observer when the
-``TranscriptionFrame`` is pushed, not when the app bot's turn aggregator closes
-a turn. That only works because the ``stt``→``user_aggregator`` hop is a
-downstream push and therefore observable — the aggregator itself *consumes* the
-frame and never pushes it on. Both halves of that claim are asserted here
-through a real ``Pipeline`` containing the real aggregator.
-"""
+"""Transcript delivery through the simplified pipeline."""
 
 import asyncio
 
-from pipecat.frames.frames import Frame, TranscriptionFrame
+from pipecat.frames.frames import (
+    Frame,
+    LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame,
+    LLMTextFrame,
+    TranscriptionFrame,
+)
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineWorker
-from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.workers.runner import WorkerRunner
 
@@ -48,13 +45,12 @@ class _FakeTransport:
         return _Relay()
 
 
-async def test_transcript_is_delivered_at_the_hop_into_the_aggregator():
+async def test_transcript_is_delivered_exactly_once_without_user_aggregator():
     agent = PipecatMCPAgent(_FakeTransport())  # type: ignore[arg-type]
-    user_aggregator, _ = agent._create_context_aggregators(LLMContext())
-    stt_stand_in, downstream_of_aggregator = _Relay(), _Relay()
+    stt_stand_in, downstream = _Relay(), _Relay()
 
     worker = PipelineWorker(
-        Pipeline([stt_stand_in, user_aggregator, downstream_of_aggregator]),
+        Pipeline([stt_stand_in, downstream]),
         cancel_on_idle_timeout=False,
         enable_rtvi=False,
         observers=[agent_module._PipelineEventObserver(agent)],
@@ -71,8 +67,36 @@ async def test_transcript_is_delivered_at_the_hop_into_the_aggregator():
     assert len(transcripts) == 1
     assert transcripts[0].text == "the bot said this"  # type: ignore[attr-defined]
 
-    # The other half of Q4: the aggregator consumes the frame, so watching any
-    # hop AFTER it would have seen nothing. This is why _WATCHED is enough only
-    # because observers see pushes rather than deliveries.
-    assert not [f for f in downstream_of_aggregator.seen if isinstance(f, TranscriptionFrame)]
+    # It continues downstream, while frame-id deduplication ensures its
+    # multiple observed hops still produce only one event.
+    assert [f for f in downstream.seen if isinstance(f, TranscriptionFrame)]
     assert [f for f in stt_stand_in.seen if isinstance(f, TranscriptionFrame)]
+
+
+async def test_tester_response_triplet_reaches_tts_and_assistant_context():
+    """The retained aggregator remains after TTS and records tester speech."""
+    agent = PipecatMCPAgent(_FakeTransport())  # type: ignore[arg-type]
+    tts = _Relay()
+    assistant_aggregator = agent._create_assistant_aggregator()
+    worker = PipelineWorker(
+        Pipeline([tts, assistant_aggregator]),
+        cancel_on_idle_timeout=False,
+        enable_rtvi=False,
+    )
+    runner = WorkerRunner(handle_sigterm=False)
+    await runner.add_workers(worker)
+    run_task = asyncio.create_task(runner.run())
+
+    await worker.queue_frames(
+        [
+            LLMFullResponseStartFrame(),
+            LLMTextFrame("hello from the tester"),
+            LLMFullResponseEndFrame(),
+        ]
+    )
+    await worker.stop_when_done()
+    await run_task
+
+    assert [type(frame) for frame in tts.seen if isinstance(frame, LLMTextFrame)] == [LLMTextFrame]
+    assert assistant_aggregator._context.messages[-1]["role"] == "assistant"
+    assert assistant_aggregator._context.messages[-1]["content"] == "hello from the tester"

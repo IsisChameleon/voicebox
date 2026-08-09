@@ -150,10 +150,17 @@ class _FakeTransport:
 def test_vad_stage_precedes_the_stt():
     # D2: the shipped pipeline order, asserted on the real _build_stages.
     agent = PipecatMCPAgent(_FakeTransport())  # type: ignore[arg-type]
-    vad, stt, user_aggregator, tts, assistant_aggregator = (_Sink() for _ in range(5))
-    stages = agent._build_stages(vad, stt, user_aggregator, tts, assistant_aggregator)  # type: ignore[arg-type]
+    vad, stt, tts, assistant_aggregator = (_Sink() for _ in range(4))
+    stages = agent._build_stages(vad, stt, tts, assistant_aggregator)  # type: ignore[arg-type]
 
-    assert stages.index(vad) < stages.index(stt) < stages.index(user_aggregator)
+    assert stages == [
+        agent._transport.input_stage,
+        vad,
+        stt,
+        tts,
+        assistant_aggregator,
+        agent._transport.output_stage,
+    ]
 
 
 def test_vad_analyzer_keeps_the_one_second_stop():
@@ -162,16 +169,3 @@ def test_vad_analyzer_keeps_the_one_second_stop():
     vad = PipecatMCPAgent(_FakeTransport())._create_vad_processor()  # type: ignore[arg-type]
 
     assert vad._vad_controller._vad_analyzer.params.stop_secs == VAD_STOP_SECS == 1.0
-
-
-def test_aggregator_does_no_vad_of_its_own():
-    # D2: the aggregator sits downstream of the STT, so a VAD there is the bug.
-    # _vad_controller is the thing the aggregator builds when it is given an
-    # analyzer; None means it emits no VAD frames at all.
-    from pipecat.processors.aggregators.llm_context import LLMContext
-
-    user_aggregator, _ = PipecatMCPAgent(_FakeTransport())._create_context_aggregators(  # type: ignore[arg-type]
-        LLMContext()
-    )
-
-    assert user_aggregator._vad_controller is None

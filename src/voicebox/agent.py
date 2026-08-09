@@ -6,7 +6,7 @@
 
 """Pipecat agent for the browser-shim audio path.
 
-Builds the STT → aggregator → TTS pipeline behind a WebSocket transport
+Builds the VAD → STT → TTS pipeline behind a WebSocket transport
 that an in-browser shim connects to. Exposes ``listen_events()`` and
 ``speak()`` that the MCP server drives over IPC.
 
@@ -29,7 +29,6 @@ from typing import Optional
 
 from dotenv import load_dotenv
 from loguru import logger
-from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import (
@@ -50,10 +49,7 @@ from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.processors.aggregators.llm_response_universal import (
-    LLMContextAggregatorPair,
-    LLMUserAggregatorParams,
-)
+from pipecat.processors.aggregators.llm_response_universal import LLMAssistantAggregator
 from pipecat.processors.audio.vad_processor import VADProcessor
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.runner.types import RunnerArguments
@@ -61,14 +57,6 @@ from pipecat.services.stt_service import STTService
 from pipecat.services.tts_service import TTSService
 from pipecat.services.whisper.stt import WhisperSTTService, WhisperSTTServiceMLX
 from pipecat.transports.base_transport import BaseTransport
-from pipecat.turns.user_start import (
-    TranscriptionUserTurnStartStrategy,
-    VADUserTurnStartStrategy,
-)
-from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
-    TurnAnalyzerUserTurnStopStrategy,
-)
-from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 
 from voicebox.artifacts import existing_artifact_path
@@ -89,7 +77,7 @@ from voicebox.processors.nonblocking_whisper_stt import (
 )
 from voicebox.raw_pcm_serializer import RawPCMSerializer
 from voicebox.runner_args import BrowserShimRunnerArguments
-from voicebox.timing import TimedSTTMixin, TimedTurnAnalyzerMixin
+from voicebox.timing import TimedSTTMixin
 
 load_dotenv(override=True)
 
@@ -152,10 +140,6 @@ class _NonBlockingWhisperSTTServiceMLX(  # type: ignore[misc]
     """MLX Whisper STT, transcribing off the frame task, timed at DEBUG."""
 
 
-class _TimedSmartTurnAnalyzer(TimedTurnAnalyzerMixin, LocalSmartTurnAnalyzerV3):
-    """Smart-turn v3 analyzer with ``analyze_end_of_turn`` timed at DEBUG."""
-
-
 class _PipelineEventObserver(BaseObserver):
     """Feeds the agent's event log from frames crossing the pipeline.
 
@@ -172,10 +156,8 @@ class _PipelineEventObserver(BaseObserver):
         BotStoppedSpeakingFrame,
         InterruptionFrame,
         TTSStoppedFrame,
-        # The app bot's transcript, watched at the stt→user_aggregator hop.
-        # The aggregator CONSUMES final TranscriptionFrames and never pushes
-        # them on (pipecat llm_response_universal.py:696-700), but the push
-        # INTO it is downstream and therefore observable here.
+        # The app bot's transcript, observed as it leaves the STT. Frame ids
+        # are deduplicated because it now continues through the whole pipeline.
         TranscriptionFrame,
     )
 
@@ -367,11 +349,15 @@ class PipecatMCPAgent:
             text: The transcribed utterance; ``""`` for a silent segment.
 
         """
-        started = (
-            self._unclaimed_bot_speech_starts.popleft()
-            if self._unclaimed_bot_speech_starts
-            else time.time()
-        )
+        if self._unclaimed_bot_speech_starts:
+            started = self._unclaimed_bot_speech_starts.popleft()
+        else:
+            logger.warning(
+                "app-bot transcript has no matching VAD start; using current-time fallback "
+                f"(transcription_empty={not text}, "
+                f"unclaimed_starts={len(self._unclaimed_bot_speech_starts)})"
+            )
+            started = time.time()
         turn_started_at = datetime.fromtimestamp(started, tz=timezone.utc).isoformat(
             timespec="milliseconds"
         )
@@ -494,8 +480,7 @@ class PipecatMCPAgent:
         # the cold path it replaces.
         self._spawn_task(tts.warm_up(), "kokoro_warm_up")
 
-        context = LLMContext()
-        user_aggregator, assistant_aggregator = self._create_context_aggregators(context)
+        assistant_aggregator = self._create_assistant_aggregator()
 
         if self._record_dir:
             from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
@@ -506,9 +491,7 @@ class PipecatMCPAgent:
                 buffer_size=0,  # accumulate everything
             )
 
-        pipeline = Pipeline(
-            self._build_stages(vad, stt, user_aggregator, tts, assistant_aggregator)
-        )
+        pipeline = Pipeline(self._build_stages(vad, stt, tts, assistant_aggregator))
 
         # enable_rtvi=False: we are a headless synthetic user, not an RTVI
         # client. Conversation events reach Claude via listen_events()'s
@@ -532,10 +515,6 @@ class PipecatMCPAgent:
         async def on_disconnected(transport, client):
             logger.info("Client disconnected")
             await self._emit(VoiceboxEvent(type=EventType.CLIENT_DISCONNECTED))
-
-        # No `on_user_turn_stopped` handler: the app bot's transcript is
-        # emitted by the observer the moment its TranscriptionFrame is pushed,
-        # so nothing consumes the aggregator's turn closure any more (D24).
 
         # Log header: consumers of app_bot_speech_stopped timings need the
         # built-in VAD lag to subtract it.
@@ -630,8 +609,8 @@ class PipecatMCPAgent:
         """Wait until the event log stops growing (bounded).
 
         A drained STT queue means Whisper finished, not that the transcript
-        events landed: the frames still hop STT → aggregator → handler, each
-        on its own task. Polls until one quiet interval or ``max_wait``.
+        events landed: frames still cross processor tasks after decode. Polls
+        until one quiet interval or ``max_wait``.
         """
         deadline = asyncio.get_event_loop().time() + max_wait
         count = len(self._events)
@@ -735,8 +714,8 @@ class PipecatMCPAgent:
             ``{"events": [...], "cursor": <next cursor>, "transcription_lag_secs": <float>}``.
             The lag is the age of the oldest audio segment still queued for
             Whisper — non-zero means "a transcript is coming". The converse
-            does NOT hold: decoded text held by the aggregator's still-open
-            turn reads 0.0 (D11/D14), so 0.0 is not proof nothing is pending.
+            does NOT hold: a decoded frame can still be crossing processor
+            tasks, so 0.0 is not proof nothing is pending.
 
         """
         if not self._started:
@@ -979,42 +958,19 @@ class PipecatMCPAgent:
             vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=VAD_STOP_SECS))
         )
 
-    def _create_context_aggregators(self, context: LLMContext) -> LLMContextAggregatorPair:
-        """Build the user/assistant aggregator pair.
+    def _create_assistant_aggregator(self) -> LLMAssistantAggregator:
+        """Build the retained tester-side context aggregator.
 
-        The pair carries no ``vad_analyzer``: the VAD is a pipeline stage
-        upstream of the STT (see ``_build_stages``), not a parameter of a
-        processor that sits downstream of it.
+        It records the LLM response frame triplets queued by ``speak()`` and
+        preserves pipecat's assistant interruption bookkeeping. The app-bot
+        user aggregator has no consumer and is deliberately not constructed.
         """
-        return LLMContextAggregatorPair(
-            context,
-            user_params=LLMUserAggregatorParams(
-                # No user_turn_stop_timeout override: pipecat's 5 s default
-                # applies to a turn nothing consumes. The app bot's transcript
-                # no longer rides on turn closure (D24), so no value here is
-                # compared against Whisper's decode speed.
-                user_turn_strategies=UserTurnStrategies(
-                    # The "user" of this pipeline is the REMOTE BOT (its audio
-                    # is our input). The default start strategies ship with
-                    # enable_interruptions=True, which cancels our in-flight
-                    # Kokoro TTS the moment the bot makes a sound — a synthetic
-                    # human must be able to keep talking (and talk over the bot).
-                    start=[
-                        VADUserTurnStartStrategy(enable_interruptions=False),
-                        TranscriptionUserTurnStartStrategy(enable_interruptions=False),
-                    ],
-                    stop=[
-                        TurnAnalyzerUserTurnStopStrategy(turn_analyzer=_TimedSmartTurnAnalyzer())
-                    ],
-                ),
-            ),
-        )
+        return LLMAssistantAggregator(LLMContext())
 
     def _build_stages(
         self,
         vad: FrameProcessor,
         stt: STTService,
-        user_aggregator: FrameProcessor,
         tts: TTSService,
         assistant_aggregator: FrameProcessor,
     ) -> list[FrameProcessor]:
@@ -1033,7 +989,6 @@ class PipecatMCPAgent:
             self._transport.input(),
             vad,
             stt,
-            user_aggregator,
             tts,
             assistant_aggregator,
             self._transport.output(),

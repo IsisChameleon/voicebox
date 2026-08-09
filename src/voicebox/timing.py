@@ -6,11 +6,8 @@
 
 r"""DEBUG-level wall-clock instrumentation for the audio path.
 
-Phase 0 of the audio-path fix plan: a session showed a steady per-turn
-transcript lag much larger than warm Whisper throughput accounts for. Rather
-than assume which call spends the seconds, this module measures the two
-candidates -- the STT's ``run_stt`` and the turn analyzer's
-``analyze_end_of_turn`` -- so a live session log attributes the lag by name.
+Measures the STT's ``run_stt`` call so a live session log attributes
+transcription lag to the decode rather than leaving it unexplained.
 
 Every line is greppable by ``TIMING_PREFIX`` and carries the duration as a
 plain float, so a log can be split with one grep:
@@ -27,9 +24,7 @@ from collections.abc import AsyncGenerator, Iterator
 from contextlib import contextmanager
 
 from loguru import logger
-from pipecat.audio.turn.base_turn_analyzer import BaseTurnAnalyzer, EndOfTurnState
 from pipecat.frames.frames import Frame
-from pipecat.metrics.metrics import MetricsData
 from pipecat.services.stt_service import STTService
 
 # Single stable prefix for every timing line. Grep this and nothing else.
@@ -85,22 +80,3 @@ class TimedSTTMixin(STTService):
         with log_duration("run_stt"):
             async for frame in super().run_stt(audio):  # type: ignore
                 yield frame
-
-
-class TimedTurnAnalyzerMixin(BaseTurnAnalyzer):
-    """Times ``analyze_end_of_turn`` on whatever turn analyzer it is mixed into.
-
-    Same ordering rule as :class:`TimedSTTMixin`: list it first in the bases.
-    The analyzer runs local ONNX inference on every VAD stop, so it is the
-    prime suspect for the unattributed per-turn lag.
-    """
-
-    async def analyze_end_of_turn(self) -> tuple[EndOfTurnState, MetricsData | None]:
-        """Delegate the end-of-turn decision to the wrapped analyzer, timing it.
-
-        Returns:
-            The wrapped analyzer's ``(state, prediction)`` result, unchanged.
-
-        """
-        with log_duration("analyze_end_of_turn"):
-            return await super().analyze_end_of_turn()

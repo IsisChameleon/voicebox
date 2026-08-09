@@ -20,7 +20,7 @@ pipeline *input*, pipecat's "user") and `tester` (us, Kokoro-voiced; pipeline *o
 | Element | Role | Evidence |
 |---|---|---|
 | MCP tool surface (`start_browser_session`, `speak`, `listen`, `stop`) | The four verbs the LLM drives; text/control only, no audio | `src/voicebox/server.py:125-415` |
-| `PipecatMCPAgent` | Owns the STT→aggregator→TTS pipeline and the session's event log; exposes `listen_events()`/`speak()`/`stop()` | `src/voicebox/agent.py:272-1017` |
+| `PipecatMCPAgent` | Owns the VAD→STT→TTS→assistant-context pipeline and the session's event log; exposes `listen_events()`/`speak()`/`stop()` | `src/voicebox/agent.py` |
 | Event log + `EventType` vocabulary | Monotonic, timestamped conversation record; the single source of truth `listen()` streams by cursor | `src/voicebox/events.py:29-128`, `src/voicebox/agent.py:297-304`, `src/voicebox/agent.py:349-354` |
 | `_PipelineEventObserver` | Translates pipecat frames (VAD user start/stop, bot start/stop, interruption, TTS stopped) into log events without touching the pipeline | `src/voicebox/agent.py:169-201`, `src/voicebox/agent.py:388-430` |
 | `_Playout` | Tracks one in-flight `speak(wait_for_playout=True)` until its audio truly ends (first `BotStoppedSpeakingFrame` after `TTSStoppedFrame`), or an interruption | `src/voicebox/agent.py:204-269` |
@@ -84,7 +84,7 @@ data and injected as text (`src/voicebox/browser_session.py:273-274`).
 | Build/QA | `uv sync`; `voicebox` console script; ruff (D+I rules, line 100), pyright, pytest | `pyproject.toml:21-32`, `pyproject.toml:50-51`, `pyproject.toml:60-81` |
 | Branch discipline | `BUILDLOG.md` (append-only decisions), `docs/walkthroughs/`, `docs/artefacts/<branch>/` | `CLAUDE.md` "Branch discipline" section; `BUILDLOG.md` |
 
-External dependency worth naming: **pipecat-ai ≥ 1.3.0** with `local-smart-turn`, `silero`,
+External dependency worth naming: **pipecat-ai ≥ 1.3.0** with `silero`,
 `websocket`, and platform-split Whisper extras (`mlx-whisper` on macOS, `whisper`/faster-whisper
 elsewhere) — the platform split is mirrored in `_create_stt_service`
 (`src/voicebox/agent.py:919-936`, `pyproject.toml:26-28`).
@@ -117,10 +117,10 @@ this list.
 |---|---|---|---|---|
 | I1 | The VAD stage sits BETWEEN transport input and STT | `SegmentedSTTService` trims its buffer while it believes the user is silent; VAD downstream ⇒ 85–90 % of audio discarded during a slow decode | `src/voicebox/agent.py:993-1000` | `tests/test_vad_placement.py`, S2 |
 | I2 | Whisper never runs on pipecat's frame task (worker + eager decode) | Inline decode freezes the loop (measured 21 s on a 40 s utterance); a queued `speak` played 51 s late | `src/voicebox/processors/nonblocking_whisper_stt.py:7-37`, `:58-93` | `tests/test_nonblocking_stt.py`, S2 |
-| I3 | User-turn start strategies have `enable_interruptions=False` | The "user" is the app bot; defaults would cancel our in-flight Kokoro TTS the moment the bot makes a sound — the tester must be able to talk over it | `src/voicebox/agent.py:966-979` | S3 |
+| I3 | App-bot VAD does not drive pipecat user-turn strategies | The unused user aggregator and its default interruption machinery are absent, so app-bot speech cannot cancel tester TTS | `src/voicebox/agent.py:_build_stages` | S3 |
 | I4 | Kokoro yields one buffered, gap-free utterance (no per-chunk streaming) | Synthesis gaps became 1.6–4.2 s of real mic silence; the app heard one utterance as several turns | `src/voicebox/processors/kokoro_tts.py:197-215` | `tests/test_kokoro_playout.py`, S3 |
 | I5 | Every parent IPC deadline outlives the child budget it wraps: stop 210 s > drain cap 180 s; speak 60 s > playout 30 s | At stop=30 s the parent reaped the child mid-drain, before `events.json`/`metrics.json` were written (round 4 lost its artifact set) | `src/voicebox/server.py:41-59`, `src/voicebox/server.py:62-88`, `src/voicebox/processors/nonblocking_whisper_stt.py:53-55` | `tests/test_stop_drains_stt.py`, S4 |
-| I6 | `TURN_STOP_TIMEOUT_SECS` (240) > drain cap (180) | If the aggregator watchdog fires before a slow decode lands, the turn closes empty and the transcript re-emits as an orphan stamped at arrival time | `src/voicebox/agent.py:116-125` | S2 |
+| I6 | App-bot transcript delivery is independent of turn closure | The observer emits each `TranscriptionFrame` directly; no user aggregator, watchdog, or smart-turn model is constructed | `src/voicebox/agent.py:_PipelineEventObserver` | S2 |
 | I7 | Asymmetric wire rates: tap 16 kHz in (Whisper hard-assumes 16 k), mic 48 kHz out (page-native); the shim's `AudioContext` does the 48→16 resample | Wrong rate ⇒ chipmunk/slow audio or Whisper garbage | `src/voicebox/agent.py:1030-1041`, `src/voicebox/shim.js:31-37`, `src/voicebox/runner_args.py:43-47` | S2, S3 |
 | I8 | Children are started with `spawn`, never fork | Fork from the async MCP context copies the event loop/fds/locks and breaks | `src/voicebox/agent_ipc.py:22-25` | S1 |
 | I9 | Exactly one WS client: the shim is injected page-scoped, never context-wide; attached CDP clients must not open tabs | A second tab connecting to :9091 triggers pipecat's one-client kick → 1 Hz reconnect storm | `src/voicebox/browser_session.py:300-306` | S1 |
@@ -168,7 +168,7 @@ stalls, batch-STT lag).
 | 5 | VAD stage (`stop_secs=1.0`) ahead of the STT (I1); start frame → `app_bot_speech_started` + unclaimed-start queued (I14) | logical | `src/voicebox/agent.py:941-950`, `:1002-1010`, `:396-401` |
 | 6 | STT `run_stt` enqueues the segment and yields nothing — frame task freed (I2) | process | `src/voicebox/processors/nonblocking_whisper_stt.py:160-178` |
 | 7 | Single worker transcribes in order; eager decode inside `to_thread` | process | `src/voicebox/processors/nonblocking_whisper_stt.py:180-194`, `:58-93` |
-| 8 | Aggregator `on_user_turn_stopped` → `app_bot_transcript` event stamped from the claimed VAD start; empty text flagged, not dropped | logical | `src/voicebox/agent.py:504-510`, `:356-386`, `src/voicebox/events.py:73-88` |
+| 8 | Observer sees the `TranscriptionFrame` leaving STT → `app_bot_transcript` stamped from the claimed VAD start; empty worker outcomes are flagged, not dropped | logical | `src/voicebox/agent.py:_PipelineEventObserver`, `:_emit_app_bot_transcript`, `src/voicebox/events.py:73-88` |
 | 9 | `listen_events(cursor)` wakes on the condition, returns events + next cursor + `transcription_lag_secs` (tells "still transcribing" from "silence") | logical | `src/voicebox/agent.py:687-739` |
 | 10 | Response routed by correlation id back to the MCP `listen` tool | process | `src/voicebox/bot.py:56-63`, `src/voicebox/agent_ipc.py:236-243`, `src/voicebox/server.py:209-278` |
 
@@ -183,8 +183,8 @@ plain and `wait_for_turn` speaks (hops 5–9 are shared).
 | 2 | Child runs it as its own task — a pending `listen` is not blocked | process | `src/voicebox/bot.py:109-111` |
 | 3 | Arm: snapshot log position synchronously (I13), emit `tester_barge_in_armed`, return `{"armed": true}` | logical | `src/voicebox/agent.py:816-828` |
 | 4 | Trigger task waits for the next matching event, sleeps `timer_secs`, emits `tester_barge_in_fired` + `tester_transcript` (ground truth, not STT) | process | `src/voicebox/agent.py:884-904`, `src/voicebox/events.py:104-128` |
-| 5 | LLM-response frame triplet queued → Kokoro synthesizes, buffers the whole utterance, yields gap-free (I4) | logical | `src/voicebox/agent.py:906-917`, `src/voicebox/processors/kokoro_tts.py:197-215` |
-| 6 | Our TTS is not cancelled by the bot's voice (I3) | process | `src/voicebox/agent.py:966-979` |
+| 5 | LLM-response frame triplet queued → VAD and STT pass it through → Kokoro synthesizes and buffers the whole utterance → retained assistant aggregator records tester context | logical | `src/voicebox/agent.py:_queue_speak_frames`, `:_build_stages`, `src/voicebox/processors/kokoro_tts.py:197-215` |
+| 6 | Our TTS is not cancelled by the bot's voice because no app-bot user-turn controller exists (I3) | process | `src/voicebox/agent.py:_build_stages` |
 | 7 | Transport output serializes at 48 kHz over the WS (I7) | process | `src/voicebox/agent.py:1034-1041`, `src/voicebox/raw_pcm_serializer.py:31-35` |
 | 8 | Shim wraps bytes as `AudioData`, fans out to every live synthetic-mic writer; the app's own WebRTC carries our voice out | logical | `src/voicebox/shim.js:114-139`, `:72-92`, `:153-175` |
 | 9 | Observer logs `tester_speech_started/stopped/interrupted`; `_Playout` resolves `wait_for_playout` on real audio end, timeout returns a diagnosis (`played: false` + reason), not an exception | logical | `src/voicebox/agent.py:407-430`, `:204-269`, `:851-877` |
