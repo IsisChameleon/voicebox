@@ -6,16 +6,14 @@
 
 """The fake app's "brain" seam: which processor fills the LLM slot of the pipeline.
 
-``create_brain()`` picks by ``VOICEBOX_FAKE_APP_LLM_PROVIDER``:
-
-- ``anthropic`` (default) / ``openai`` — pipecat's stock LLM service, needs the
-  provider's API key in the environment.
-- ``scripted`` — a deterministic canned responder (no API key): it plays the
-  trivia-host lines below in order, one per user turn, ignoring what was said.
-  Determinism is what future evals need; the third line is deliberately LONG so
-  barge-in tests have a multi-sentence utterance to interrupt.
+``create_brain()`` picks by ``VOICEBOX_FAKE_APP_LLM_PROVIDER`` (env-var table in
+``README.md``): ``anthropic`` (default) / ``openai`` are pipecat's stock LLM
+services; ``scripted`` plays the canned lines below in order, deterministically
+and key-free — line 3 is deliberately long so barge-in tests have a
+multi-sentence utterance to interrupt.
 """
 
+import itertools
 import os
 
 from pipecat.frames.frames import (
@@ -64,8 +62,7 @@ class ScriptedBrain(FrameProcessor):
     def __init__(self, script: list[str]):
         """Initialize with the ordered lines to play (cycled when exhausted)."""
         super().__init__()
-        self._script = script
-        self._index = 0
+        self._lines = itertools.cycle(script)
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Respond to completed user turns; pass every other frame through."""
@@ -73,8 +70,7 @@ class ScriptedBrain(FrameProcessor):
         if not isinstance(frame, LLMContextFrame):
             await self.push_frame(frame, direction)
             return
-        line = self._script[self._index % len(self._script)]
-        self._index += 1
+        line = next(self._lines)
         await self.push_frame(LLMFullResponseStartFrame())
         await self.push_frame(LLMTextFrame(line))
         await self.push_frame(LLMFullResponseEndFrame())

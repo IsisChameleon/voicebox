@@ -6,15 +6,11 @@
 
 """Nova — the fake voice app voicebox dogfoods and (later) evaluates itself against.
 
-A plain pipecat voice bot served by pipecat's development runner: browser UI on
-http://localhost:7860, SmallWebRTC in/out, Silero VAD, Whisper STT, a swappable
-"brain" (see ``brain.py``) and Kokoro TTS (reused from voicebox, different voice
-so tester and bot are audibly distinct). The app knows NOTHING about voicebox —
-its only extra is a ground-truth observer writing what *it* saw to disk, the
-reference timeline future evals score voicebox's ``listen()`` claims against.
+Pipeline assembly, runner entry, and the ground-truth observer. What it is and
+how to run it: ``README.md`` beside this file; design:
+``docs/specs/2026-08-09-demo-voice-app-for-dogfooding.md``.
 
-Run: ``uv run python tests/eval/fake_app/bot.py`` (see spec
-``docs/specs/2026-08-09-demo-voice-app-for-dogfooding.md``).
+Run: ``uv run python tests/eval/fake_app/bot.py``.
 """
 
 import json
@@ -83,20 +79,27 @@ class GroundTruthObserver(BaseObserver):
     )
 
     def __init__(self, path: Path, session_id: str | None):
-        """Record the session start into ``path`` (created if missing)."""
+        """Open ``path`` for line-buffered appending and record the session start."""
         super().__init__()
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._path = path
+        self._file = path.open("a", buffering=1)
         self._seen_frame_ids: set[int] = set()
         self._reply_parts: list[str] = []
         self._bot_speaking = False
         self._write("session_started", session_id=session_id)
 
     def _write(self, event: str, **fields):
-        # Open-append-close per record: a few writes per turn, and no fd left
-        # dangling per session (nothing tears an observer down on disconnect).
-        with self._path.open("a") as f:
-            f.write(json.dumps({"t": time.time(), "event": event, **fields}) + "\n")
+        self._file.write(json.dumps({"t": time.time(), "event": event, **fields}) + "\n")
+
+    async def cleanup(self):
+        """Record the session end and close the file.
+
+        ``PipelineWorker._cleanup`` forwards ``cleanup()`` to every observer on
+        teardown, so a missing ``session_ended`` line marks a crashed session.
+        """
+        await super().cleanup()
+        self._write("session_ended")
+        self._file.close()
 
     async def on_push_frame(self, data: FramePushed):
         """Record each watched frame once, at its first downstream hop."""
@@ -120,6 +123,11 @@ class GroundTruthObserver(BaseObserver):
             self._write("brain_reply", text="".join(self._reply_parts))
             self._reply_parts = []
         elif isinstance(frame, InterruptionFrame):
+            if self._reply_parts:
+                # A streaming reply was cut mid-generation: record what was
+                # produced so the parts don't leak into the next reply.
+                self._write("brain_reply", text="".join(self._reply_parts), interrupted=True)
+                self._reply_parts = []
             self._write("interrupted", during_bot_speech=self._bot_speaking)
 
 
@@ -170,7 +178,10 @@ async def bot(runner_args: RunnerArguments):
         logger.info("Client disconnected")
         await worker.cancel()
 
-    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
+    runner = WorkerRunner(
+        handle_sigint=runner_args.handle_sigint,
+        handle_sigterm=runner_args.handle_sigterm,
+    )
     await runner.add_workers(worker)
     await runner.run()
 

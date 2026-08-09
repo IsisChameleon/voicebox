@@ -49,9 +49,10 @@ regardless of what you say; line 3 is the deliberately long one.
 ## Ground truth
 
 Every session appends the app's own timeline to `temp/fake_app/ground_truth.jsonl` (anchored to
-the repo root, whatever directory you launch from). One JSON record per line: session start,
-bot speech start/stop, what its Whisper heard from the tester (`heard_user`), what the brain
-replied (`brain_reply`), and interruptions (`during_bot_speech: true` marks a real barge-in). This is the reference timeline future
+the repo root, whatever directory you launch from). One JSON record per line: session start/end
+(a missing `session_ended` marks a crashed session), bot speech start/stop, what its Whisper
+heard from the tester (`heard_user`), what the brain replied (`brain_reply`), and interruptions
+(`during_bot_speech: true` marks a real barge-in). This is the reference timeline future
 evals score voicebox's `listen()` events against — disk only, never exposed over the network, so
 voicebox can't cheat.
 
