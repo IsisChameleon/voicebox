@@ -19,10 +19,12 @@ Run: ``uv run python tests/eval/fake_app/bot.py`` (see spec
 
 import json
 import os
-import sys
 import time
 from pathlib import Path
 
+# Script mode only (`python tests/eval/fake_app/bot.py`): the script dir is
+# sys.path[0], so the sibling module imports bare.
+from brain import create_brain
 from dotenv import load_dotenv
 from loguru import logger
 from pipecat.audio.vad.silero import SileroVADAnalyzer
@@ -50,18 +52,13 @@ from pipecat.workers.runner import WorkerRunner
 
 from voicebox.processors.kokoro_tts import KokoroTTSService
 
-# Script mode (`python tests/eval/fake_app/bot.py`) already has this dir on
-# sys.path; the insert makes `import tests.eval.fake_app.bot` work too.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from brain import create_brain  # noqa: E402
-
-load_dotenv(override=True)
+load_dotenv()
 
 STT_MODEL = os.environ.get("VOICEBOX_FAKE_APP_STT_MODEL", "base")
 PROMPT_PATH = Path(__file__).resolve().parent / "prompt.md"
-# Repo convention: all run artifacts under temp/ (gitignored); run from the repo root.
-GROUND_TRUTH_PATH = Path("temp/fake_app/ground_truth.jsonl")
+# Repo convention: all run artifacts under temp/ (gitignored) — anchored to the
+# repo root so any launch directory works.
+GROUND_TRUTH_PATH = Path(__file__).resolve().parents[3] / "temp/fake_app/ground_truth.jsonl"
 
 
 class GroundTruthObserver(BaseObserver):
@@ -71,7 +68,7 @@ class GroundTruthObserver(BaseObserver):
     bot's speech start/stop, what its Whisper heard from the tester, what the
     brain replied, and interruptions. Note pipecat broadcasts
     ``InterruptionFrame`` at every user turn start, so ``interrupted`` records
-    are real barge-ins only when they fall inside a bot speech span.
+    carry ``during_bot_speech`` — only ``true`` ones are real barge-ins.
     Disk only, never exposed over the network — voicebox must not be able to
     read it mid-session.
     """
@@ -86,16 +83,20 @@ class GroundTruthObserver(BaseObserver):
     )
 
     def __init__(self, path: Path, session_id: str | None):
-        """Open ``path`` for line-buffered appending and record the session start."""
+        """Record the session start into ``path`` (created if missing)."""
         super().__init__()
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._file = path.open("a", buffering=1)
+        self._path = path
         self._seen_frame_ids: set[int] = set()
         self._reply_parts: list[str] = []
+        self._bot_speaking = False
         self._write("session_started", session_id=session_id)
 
     def _write(self, event: str, **fields):
-        self._file.write(json.dumps({"t": time.time(), "event": event, **fields}) + "\n")
+        # Open-append-close per record: a few writes per turn, and no fd left
+        # dangling per session (nothing tears an observer down on disconnect).
+        with self._path.open("a") as f:
+            f.write(json.dumps({"t": time.time(), "event": event, **fields}) + "\n")
 
     async def on_push_frame(self, data: FramePushed):
         """Record each watched frame once, at its first downstream hop."""
@@ -106,8 +107,10 @@ class GroundTruthObserver(BaseObserver):
             return
         self._seen_frame_ids.add(frame.id)
         if isinstance(frame, BotStartedSpeakingFrame):
+            self._bot_speaking = True
             self._write("bot_speech_started")
         elif isinstance(frame, BotStoppedSpeakingFrame):
+            self._bot_speaking = False
             self._write("bot_speech_stopped")
         elif isinstance(frame, TranscriptionFrame):
             self._write("heard_user", text=frame.text)
@@ -117,7 +120,7 @@ class GroundTruthObserver(BaseObserver):
             self._write("brain_reply", text="".join(self._reply_parts))
             self._reply_parts = []
         elif isinstance(frame, InterruptionFrame):
-            self._write("interrupted")
+            self._write("interrupted", during_bot_speech=self._bot_speaking)
 
 
 async def bot(runner_args: RunnerArguments):
@@ -175,4 +178,7 @@ async def bot(runner_args: RunnerArguments):
 if __name__ == "__main__":
     from pipecat.runner.run import main
 
+    # Fail fast on an unknown provider / missing API key, before serving —
+    # otherwise the error only surfaces when a client connects.
+    create_brain()
     main()
