@@ -126,7 +126,9 @@ async def test_listen_envelope_reports_transcription_lag():
     assert envelope["events"] == [] and envelope["cursor"] == 0
 
 
-async def test_transcript_turn_started_at_uses_observed_vad_start():
+async def test_transcript_turn_started_at_uses_observed_vad_start(
+    monkeypatch: pytest.MonkeyPatch,
+):
     # Round 2: the aggregator stamps *transcript arrival* as the turn start
     # whenever a monologue chunk VAD-starts while the previous chunk is still
     # in Whisper (off by up to 103 s live). voicebox's own VAD log is the
@@ -134,12 +136,42 @@ async def test_transcript_turn_started_at_uses_observed_vad_start():
     agent = _agent_ready_to_speak()
     agent._unclaimed_bot_speech_starts.append(100.0)
     agent._unclaimed_bot_speech_starts.append(200.0)
+    warnings: list[str] = []
+    monkeypatch.setattr(agent_module.logger, "warning", warnings.append)
 
     await agent._emit_app_bot_transcript("first chunk")
 
     event = agent._events[-1]
     assert event.turn_started_at == "1970-01-01T00:01:40.000+00:00"  # epoch 100.0
     assert list(agent._unclaimed_bot_speech_starts) == [200.0]  # claimed exactly one
+    assert warnings == []
+
+
+@pytest.mark.parametrize(
+    ("text", "transcription_empty"),
+    [("sensitive transcript", False), ("", True)],
+)
+async def test_transcript_without_vad_start_warns_and_uses_current_time(
+    monkeypatch: pytest.MonkeyPatch,
+    text: str,
+    transcription_empty: bool,
+):
+    agent = _agent_ready_to_speak()
+    warnings: list[str] = []
+    monkeypatch.setattr(agent_module.logger, "warning", warnings.append)
+    monkeypatch.setattr(agent_module.time, "time", lambda: 123.456)
+
+    await agent._emit_app_bot_transcript(text)
+
+    event = agent._events[-1]
+    assert event.text == text
+    assert event.turn_started_at == "1970-01-01T00:02:03.456+00:00"
+    assert event.transcription_empty is transcription_empty
+    assert len(warnings) == 1
+    assert f"transcription_empty={transcription_empty}" in warnings[0]
+    assert "unclaimed_starts=0" in warnings[0]
+    assert "current-time fallback" in warnings[0]
+    assert "sensitive transcript" not in warnings[0]
 
 
 async def test_transcription_frame_emits_transcript_on_arrival():
@@ -294,15 +326,8 @@ async def test_ungated_speak_has_no_wait_key():
     assert result == {"queued": True}
 
 
-def test_no_voicebox_constant_is_sized_against_decode_speed():
-    # D24: the turn-stop watchdog was overridden to 240 s purely so the app
-    # bot's transcript could outrun it. With delivery on the frame, the turn is
-    # consumed by nothing and pipecat's default stands — voicebox holds no
-    # constant that has to be >= the slowest Whisper decode on any machine.
-    from pipecat.processors.aggregators.llm_context import LLMContext
-
-    agent = PipecatMCPAgent(transport=None)  # type: ignore[arg-type]
-    user_aggregator, _ = agent._create_context_aggregators(LLMContext())
-
+def test_no_app_bot_turn_machinery_remains():
     assert not hasattr(agent_module, "TURN_STOP_TIMEOUT_SECS")
-    assert user_aggregator._params.user_turn_stop_timeout == 5.0  # pipecat's default
+    assert not hasattr(agent_module, "LocalSmartTurnAnalyzerV3")
+    assert not hasattr(agent_module, "_TimedSmartTurnAnalyzer")
+    assert not hasattr(PipecatMCPAgent, "_create_context_aggregators")

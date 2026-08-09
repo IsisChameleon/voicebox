@@ -73,9 +73,11 @@ class SessionStartedEvent(VoiceboxEvent):
 class TranscriptEvent(VoiceboxEvent):
     """A finished app-bot utterance.
 
-    ``turn_started_at`` is the ISO timestamp of the VAD start voicebox
+    ``turn_started_at`` is normally the ISO timestamp of the VAD start voicebox
     observed for this utterance (claimed in arrival order, like the metrics
-    matcher); the event's own ``t`` is when the batch transcript became ready.
+    matcher). If no VAD start can be correlated, voicebox warns and falls back
+    to the current time. The event's own ``t`` is when the batch transcript
+    became ready.
     ``transcription_empty`` is ``True`` when Whisper ran and recovered no
     text — the utterance happened, its words are unknown; without the flag a
     reader could not tell that from "the bot never spoke".

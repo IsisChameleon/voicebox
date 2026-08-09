@@ -211,7 +211,7 @@ so subtract it before quoting any latency number.
 3.  [CHILD-1: pipecat]             create_agent → WebsocketServerTransport with RawPCMSerializer
                                      audio_in_sample_rate  = 16000 (Whisper-MLX requires 16 kHz)
                                      audio_out_sample_rate = 48000 (Kokoro → page mic)
-                                   pipeline: transport.input → Whisper → aggregator → Kokoro → transport.output
+                                   pipeline: transport.input → VAD → Whisper → Kokoro → assistant context → transport.output
                                    websocket listening on :9091
 4.  [CHILD-2: browser]             read shim.js, prepend window.__VOICE_SHIM_WS_URL__
                                    chromium.launch(args=[--remote-debugging-port=9222,
@@ -233,8 +233,8 @@ so subtract it before quoting any latency number.
 7.  [Claude] speak("hi ember")     Kokoro renders audio → WebsocketServerTransport writes Int16 PCM
                                    over the WS → shim writes AudioData chunks into the
                                    MediaStreamTrackGenerator → the page's WebRTC peer encodes Opus
-8.  [Claude] listen()              VAD/SmartTurn waits for the bot's utterance to end →
-                                   Whisper transcript appended to the event log →
+8.  [Claude] listen()              VAD delimits the bot's utterance → Whisper's
+                                   TranscriptionFrame is appended directly to the event log →
                                    events past the cursor returned to MCP
 9.  [Claude] stop()                flushes artifacts (if record_dir), then terminates
                                    pipecat child + browser child
