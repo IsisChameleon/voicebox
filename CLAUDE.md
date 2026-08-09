@@ -50,7 +50,8 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
 | `src/voicebox/processors/nonblocking_whisper_stt.py` | `NonBlockingSegmentedSTT` — Whisper off the frame task (one worker, ordered), eager decode, drain + `transcription_lag_secs`. |
 | `src/voicebox/shim.js` | The browser shim, injected via `addInitScript` before page code. Overrides `getUserMedia` (Hook 1) and wraps `RTCPeerConnection` (Hook 2). Diagnostics on `window.__voiceShim`. |
 | `src/voicebox/browser_session.py` | Manages the Playwright child process. Supports `user_data_dir` (persistent default context, CDP-coherent — exposed via `start_browser_session` for session reuse). See the CDP context-split trap below for why `storage_state` is intentionally not offered. |
-| `scripts/smoke_browser_shim.py` | Audio-path smoke test (no readme app needed). The reference for `connect_over_cdp` + reading `__voiceShim`. |
+| `scripts/smoke_browser_shim.py` | Audio-path smoke test (no app needed). The reference for `connect_over_cdp` + reading `__voiceShim`. |
+| `tests/eval/fake_app/` | "Nova" — self-contained fake voice app (plain pipecat, `localhost:7860`), the in-repo dogfood/eval target; `uv sync --extra eval`. See its README. |
 
 ## MCP tools (`server.py`)
 
@@ -166,9 +167,9 @@ uv run pyright src/                 # types
 
 The unit suite covers the pure/mockable parts (metrics, browser-session startup, timing
 instrumentation). The audio path itself is verified by `scripts/smoke_browser_shim.py`, which
-needs a real browser; end-to-end behaviour against a running voice app on `localhost:3000` is
-exercised in live dogfood sessions — anything marked 🔴 in a spec is live-only and cannot be
-proven by `pytest`.
+needs a real browser; end-to-end behaviour is exercised in live dogfood sessions against the
+bundled fake app on `localhost:7860` (`tests/eval/fake_app/`) — anything marked 🔴 in a spec is
+live-only and cannot be proven by `pytest`.
 
 ## Branch discipline (multi-task branches)
 
