@@ -94,6 +94,11 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
   A *failed* decode is not silence and must not fire it (D25): pipecat's Whisper services report
   failure by **yielding an `ErrorFrame`**, not by raising (`whisper/stt.py:354-356`, and the MLX
   catch-all at `:547-548`), so the worker's `except` never sees one — it counts them instead.
+  But it must still *retire* the start (D26): the deque advances one entry per **segment**, so a
+  failure that signals nothing hands its start to the next transcript. The invariant is per-segment,
+  not per-outcome — every segment yielding no `TranscriptionFrame` signals exactly once,
+  `on_empty_segment` (ran, no text) or `on_failed_segment` (`ErrorFrame` *or* raised: pop the start,
+  emit nothing). A worker-level test cannot see this class of bug; it needs the agent in the loop.
   The app-bot aggregator and `LocalSmartTurnAnalyzerV3` are now vestigial; removing them is a
   separate design pass (spec Phase 4), because tester frames still route *through* the aggregator.
 - **`record_dir` exists** (`runner_args.py`, `agent.py` `_dump_artifacts`): set it and `stop()` writes

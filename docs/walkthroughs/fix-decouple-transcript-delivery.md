@@ -1,7 +1,7 @@
 # Walkthrough — `fix/decouple-transcript-delivery`
 
-*Status: **complete** (Phases 0-3 + review fix R1; Phase 4 deferred by design). 2026-08-06,
-R1 added 2026-08-09. Branched from `56807fd`.*
+*Status: **complete** (Phases 0-3 + review fixes R1, R2; Phase 4 deferred by design). 2026-08-06,
+R1 and R2 added 2026-08-09. Branched from `56807fd`.*
 
 Removes the coupling between the **app bot's** transcript reaching `listen()` and the app bot's
 turn aggregator closing a turn on a timer. Design and verified open questions:
@@ -22,6 +22,7 @@ in a browser.
 | **2** | Empty-transcript signal re-homed to the STT worker (`on_empty_segment` callback) | `b836f4f` | [t-2-empty-segment-signal.md](../artefacts/fix-decouple-transcript-delivery/t-2-empty-segment-signal.md) | ✅ |
 | **3** | `TURN_STOP_TIMEOUT_SECS` deleted; `session_started` note and `CLAUDE.md` refreshed | `1394e4b` | [t-3-retire-the-constant.md](../artefacts/fix-decouple-transcript-delivery/t-3-retire-the-constant.md) | ✅ |
 | **R1** | *Review fix:* an STT `ErrorFrame` no longer reports as an empty segment | `602fd85` | [t-review-1-error-frame-not-empty.md](../artefacts/fix-decouple-transcript-delivery/t-review-1-error-frame-not-empty.md) | ✅ |
+| **R2** | *Review fix:* a failed segment retires its VAD start instead of leaving it for the next transcript; `.codex/` untracked | `624fe22` | [t-review-2-failed-segment-vad-start.md](../artefacts/fix-decouple-transcript-delivery/t-review-2-failed-segment-vad-start.md) | ✅ |
 
 **Phase 4 (removing the vestigial aggregator + smart-turn analyzer) is deferred** — it is a
 structural change whose blast radius includes the tester side, and it gets its own design pass
@@ -130,7 +131,30 @@ in the evidence artefact.
   empty signal, the error still travelling pipecat's own path, and a later segment still
   transcribing. It fails against the pre-fix condition — mutation check in the artefact.
 
-**Watch out when reading the test:** `push_error_frame` pushes **UPSTREAM**
+**Watch out when reading the test:** it proves the worker's *classification* only — it never reaches
+the agent, which is why it did not catch what R2 fixes.
+
+### R2 — a failed segment still has to retire its VAD start
+
+- R1 stopped calling `on_empty_segment` for a failed segment and called **nothing** instead. But
+  `_unclaimed_bot_speech_starts` advances one entry per **segment**, and `_emit_app_bot_transcript`
+  pops the oldest unconditionally (`src/voicebox/agent.py:369-373`) — so the failed segment's start
+  was not parked, it was handed to the **next** transcript. Segment 1 fails at VAD start 100,
+  segment 2 transcribes at 200, and segment 2's transcript is stamped 100; every later transcript
+  keeps the offset. R1 moved the drift from the empty-signal door to the error door.
+- The invariant is per-**segment**, not per-outcome: every segment yielding no `TranscriptionFrame`
+  now signals exactly once — `on_empty_segment` (ran, recovered no text) or the new
+  `on_failed_segment` (`ErrorFrame` **or** raised: pop the start, emit no event). One branch in the
+  worker, so a third outcome can only choose *which* signal, never *whether*
+  (`src/voicebox/processors/nonblocking_whisper_stt.py`, `agent.py:_on_failed_segment`). A raised
+  exception was drifting identically and D25 had left it alone.
+- `test_failed_segment_leaves_the_next_transcripts_vad_start_alone` drives the real observer and the
+  real agent over a running pipeline; mutating the fix out reproduces the reviewer's scenario
+  (`00:01:40` instead of `00:03:20`) — output in the artefact. Two worker-level tests cover the
+  `ErrorFrame` and raised doors.
+- Also untracks `.codex/config.toml`, a personal Codex CLI config swept into `fceec63`.
+
+**Watch out when reading the R1 test:** `push_error_frame` pushes **UPSTREAM**
 (`pipecat/processors/frame_processor.py:700`), so the `ErrorFrame` never reaches a processor
 downstream of the STT; the observable hook is the `on_error` event handler it fires first (`:688`).
 
