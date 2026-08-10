@@ -20,7 +20,6 @@ takes a snapshot and performs no navigation, so it leaves the shim tab intact.
 import multiprocessing
 import os
 import time
-from multiprocessing.synchronize import Event as EventType
 from pathlib import Path
 from queue import Empty
 from typing import Optional
@@ -37,7 +36,7 @@ SHIM_READY_TIMEOUT_SECS = 10.0
 
 _browser_process: Optional[multiprocessing.Process] = None
 _startup_queue: Optional[multiprocessing.Queue] = None
-_stop_event: Optional[EventType] = None
+_stop_event: Optional[multiprocessing.Event] = None
 _record_dir: Optional[str] = None
 
 

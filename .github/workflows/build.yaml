@@ -40,9 +40,6 @@ jobs:
       - name: Run shim tests
         run: node --test tests/shim_pending_inbound.test.mjs
 
-      - name: Run type checking
-        run: uv run pyright src/voicebox
-
       - name: Build project
         run: uv build
 

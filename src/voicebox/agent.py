@@ -114,7 +114,7 @@ VAD_STOP_SECS = 1.0
 # processors/nonblocking_whisper_stt.py.
 #
 # Both classes carry `# type: ignore[misc]`: each Whisper service re-declares
-# `_settings` with its own nested Settings type, which pyright reads as
+# `_settings` with its own nested Settings type, which static analyzers read as
 # conflicting with the STTService declaration that reaches the class through
 # NonBlockingSegmentedSTT. The MRO resolves it to the concrete service's at
 # runtime; nothing here changes that.
@@ -537,11 +537,10 @@ class PipecatMCPAgent:
         self._task = asyncio.create_task(self._pipeline_runner.run())
 
         if self._audio_buffer is not None:
-            audio_buffer = self._audio_buffer
 
             async def _start_recording():
                 await self._connected.wait()
-                await audio_buffer.start_recording()
+                await self._audio_buffer.start_recording()
                 logger.info("Audio recording started")
 
             self._spawn_task(_start_recording(), "start_recording")

@@ -41,7 +41,6 @@ probe scripts and what remains unverified: the Phase 3 artefact.
 ```bash
 uv run pytest -q                     # whole suite
 uv run ruff check src/ tests/ && uv run ruff format --check src/ tests/
-uv run pyright src/
 ```
 
 ---

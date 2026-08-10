@@ -162,7 +162,6 @@ uv run python scripts/smoke_browser_shim.py   # audio-path smoke test (no app ne
 uv run pytest -q                    # unit tests (pytest-asyncio, auto mode)
 uv run ruff check src/ tests/       # lint: docstring (D) + import (I) rules, line-length 100
 uv run ruff format src/ tests/      # format
-uv run pyright src/                 # types
 ```
 
 The unit suite covers the pure/mockable parts (metrics, browser-session startup, timing

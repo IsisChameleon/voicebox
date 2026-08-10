@@ -831,3 +831,20 @@ the harness — the app must stay "any web voice app", no cheating channel).
   and pipeline changes have been superseded.
 - **Rejected:** adding a `pipecat-ai` upper bound without a demonstrated
   incompatibility. The lockfile already makes current installs reproducible.
+
+## D29 — Ruff is the only approved static-analysis tool
+
+*2026-08-10. Branch `fix/runtime-safety-ci-docs`; correction requested during
+review of PR #21.*
+
+- **Decided:** remove the unused Pyright dependency and every Pyright reference
+  from active project surfaces. Continuous integration keeps Ruff lint and
+  formatting as the static-analysis gates.
+- **Why:** the repository owner uses Ruff, not Pyright. The dependency was
+  inherited from the initial commit, but requiring it in PR #21 was an
+  unverified tooling assumption.
+- **Decided:** an executable repository contract scans active configuration,
+  source, tests, architecture, and walkthrough surfaces for the unapproved tool
+  name and fails if it returns.
+- **Rejected:** retaining Pyright as a non-blocking check. An unused second
+  analyzer adds dependency and policy noise without serving the project.

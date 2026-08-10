@@ -28,8 +28,8 @@ Status: complete
 ## T3 — Python 3.11 test and type-check CI
 
 - All workflows install Python 3.11.
-- The build installs Chromium, then requires Python tests, the Node shim test,
-  and Pyright over production source.
+- The build installs Chromium, then requires the Python and Node shim tests.
+- The separate quality workflow requires Ruff lint and formatting checks.
 - Try it: `uv run pytest -q tests/test_ci_docs_contract.py`.
 - Not covered: an Actions-hosted run before push.
 
@@ -44,7 +44,6 @@ Status: complete
 
 ```bash
 uv run pytest
-uv run pyright src/
 uv run ruff check
 uv run ruff format --check
 ```

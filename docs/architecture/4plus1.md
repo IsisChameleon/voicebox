@@ -81,7 +81,7 @@ data and injected as text (`src/voicebox/browser_session.py:273-274`).
 | Browser side | `shim.js` — self-contained IIFE, defensive (every hook gated on the API existing) | `src/voicebox/shim.js:20-27` |
 | Unit tests | `tests/` — pytest-asyncio auto mode; pin the traps: VAD placement (`tests/test_vad_placement.py`), non-blocking STT (`tests/test_nonblocking_stt.py`), stop-drains-STT (`tests/test_stop_drains_stt.py:1-6`), gap-free Kokoro playout (`tests/test_kokoro_playout.py:1-9`), speak surface (`tests/test_agent_surface.py`), metrics (`tests/test_metrics.py`), browser startup (`tests/test_browser_session.py`), timing (`tests/test_timing_instrumentation.py`) | `pyproject.toml:79-81` |
 | Live smoke drivers | `scripts/smoke_browser_shim.py:1-17` (audio plumbing, no app), `scripts/smoke_full_duplex.py:1-18` (speak during pending listen), `scripts/smoke_barge_in.py:7-16` (barge-in scheduling, real event log) | script docstrings as cited |
-| Build/QA | `uv sync`; `voicebox` console script; ruff (D+I rules, line 100), pyright, pytest | `pyproject.toml:21-32`, `pyproject.toml:50-51`, `pyproject.toml:60-81` |
+| Build/QA | `uv sync`; `voicebox` console script; Ruff (D+I rules, line 100), pytest | `pyproject.toml:21-32`, `pyproject.toml:50-51`, `pyproject.toml:60-81` |
 | Branch discipline | `BUILDLOG.md` (append-only decisions), `docs/walkthroughs/`, `docs/artefacts/<branch>/` | `CLAUDE.md` "Branch discipline" section; `BUILDLOG.md` |
 
 External dependency worth naming: **pipecat-ai ≥ 1.3.0** with `silero`,
