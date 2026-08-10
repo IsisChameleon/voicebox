@@ -17,6 +17,7 @@ def test_workflows_use_supported_python(workflow: Path) -> None:
 @pytest.mark.parametrize(
     "command",
     [
+        "uv run playwright install --with-deps chromium",
         "uv run pytest",
         "uv run pyright src/voicebox",
         "node --test tests/shim_pending_inbound.test.mjs",

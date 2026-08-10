@@ -16,10 +16,15 @@ UV_CACHE_DIR=/tmp/voicebox-uv-cache uv run pytest -q tests/test_ci_docs_contract
   Pyright, and three stale diagram contracts.
 - Adding the shim-test contract separately produced `1 failed, 8 passed` until
   the Node test became a required build step.
+- The first GitHub Actions run then failed two existing live-browser tests
+  because Chromium was absent. Adding the browser-install contract first
+  produced `1 failed, 9 passed` locally.
 
 ## Green
 
-- Contract test: `9 passed`.
+- Contract test after the Actions finding: `10 passed`.
+- The required build installs Chromium before running the two live-browser
+  tests.
 - `uv run pyright src/voicebox`: `0 errors, 0 warnings, 0 informations`.
 - `uv run ruff check`: passed.
 - `uv run ruff format --check`: `32 files already formatted`.
