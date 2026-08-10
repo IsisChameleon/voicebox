@@ -1,6 +1,6 @@
 # Walkthrough — `feat/eval-fake-app`
 
-*Status: **complete** (Phases 0–3; S1 real-mic run still pending Isabelle). 2026-08-09.
+*Status: **complete** (Phases 0–3 + S1). Updated 2026-08-10.
 Branched from `d07988b` (main, after PR #16 + #17 merged).*
 
 Adds a self-contained fake web voice app ("Nova", a space-exploration trivia host) under
@@ -22,9 +22,11 @@ User Interface on `:7860`). It knows nothing about voicebox; ground truth goes t
 | **3** | `tests/eval/fake_app/README.md`; stale readme-app / `localhost:3000` reference cleanup in `README.md` + `CLAUDE.md` | `1d41070` | [t3-readme-and-cleanup.md](../artefacts/feat-eval-fake-app/t3-readme-and-cleanup.md) | ✅ |
 | **R1** | *Review fixes:* fail-fast key check at startup; `load_dotenv` precedence; duplicate-module `sys.path` insert dropped; ground-truth fd leak + CWD-relative path; `during_bot_speech` on `interrupted` records | `a328c81` | [t-r1-review-fixes.md](../artefacts/feat-eval-fake-app/t-r1-review-fixes.md) | ✅ |
 | **R2** | *Simplify fixes:* observer `cleanup()` override (supersedes R1's per-write open/close) + `session_ended` record; interrupted-reply flush; `handle_sigterm` forwarded; `itertools.cycle`; docstring de-dup | `69b251e` | [t-r2-simplify-fixes.md](../artefacts/feat-eval-fake-app/t-r2-simplify-fixes.md) | ✅ |
+| **S1** | Isabelle used a real microphone with the prebuilt browser User Interface; log review verified a greeting and three question-and-answer turns with the Anthropic brain | — | [t-s1-real-mic.md](../artefacts/feat-eval-fake-app/t-s1-real-mic.md) | ✅ |
 
-Scenario S1 (fresh clone → real-mic conversation with Nova) is 🔴 manual — it needs Isabelle at
-the microphone and is **not** claimed verified by this branch until she runs it.
+Scenario S1 (fresh clone → real-mic conversation with Nova) was run by Isabelle on 2026-08-10.
+The session connected and used the Anthropic brain. Ground-truth log review verified a greeting,
+`Saturn`, `This is Apollo Probe`, and `1969` as human turns, with Nova replying between them.
 
 ## Try it
 
@@ -76,11 +78,9 @@ uv run python tests/eval/fake_app/bot.py
 
 ## Not covered (running list)
 
-- S1 real-mic run — pending Isabelle.
-- `ANTHROPIC_API_KEY` absent from this environment (no `.env` in the repo): the
-  `anthropic`/`openai` brains are code-verified only; live runs use `scripted` until a key
-  lands in this repo's `.env`.
-- `ground_truth.jsonl` contents — observer only runs once a WebRTC client connects (Phase 2).
+- S1 caveat — normal physical speaker volume fed Nova's output into the microphone and caused
+  false user turns. Lower speaker volume produced the passing exchange. Headphones were not tested.
+- OpenAI brain — not exercised live. The 2026-08-10 S1 attempt exercised Anthropic.
 - **Follow-up decision for Isabelle** (simplify-pass finding, spec-settled so not changed):
   pipecat 1.3.0 ships a stock `pipecat.services.kokoro.tts.KokoroTTSService` (same upstream
   code as voicebox's vendored copy, no new extra). Using it would decouple the reference
