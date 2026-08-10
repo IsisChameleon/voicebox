@@ -326,6 +326,71 @@ async def test_ungated_speak_has_no_wait_key():
     assert result == {"queued": True}
 
 
+async def test_speak_without_client_times_out_without_transcript_or_audio(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    agent = _agent_ready_to_speak()
+    agent._connected.clear()
+    monkeypatch.setattr(agent_module, "CONNECT_GRACE_SECS", 0.01)
+
+    with pytest.raises(RuntimeError, match="no browser client connected"):
+        await agent.speak("must not become ghost speech")
+
+    assert agent._pipeline_task.queued == []  # type: ignore[union-attr]
+    assert EventType.TESTER_TRANSCRIPT not in [event.type for event in agent._events]
+
+
+async def test_disconnect_clears_current_connection_state():
+    agent = _agent_ready_to_speak()
+
+    await agent._on_client_disconnected()
+
+    assert not agent._connected.is_set()
+    assert agent._events[-1].type == EventType.CLIENT_DISCONNECTED
+
+
+async def test_wait_for_turn_times_out_without_later_ghost_speech(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    agent = _agent_ready_to_speak()
+    agent._app_bot_speaking = True
+    monkeypatch.setattr(agent_module, "TURN_WAIT_TIMEOUT_SECS", 0.01)
+
+    with pytest.raises(RuntimeError, match="app bot did not fall silent"):
+        await agent.speak("do not say this later", wait_for_turn=True)
+
+    async with agent._event_cond:
+        agent._app_bot_speaking = False
+        agent._event_cond.notify_all()
+    await asyncio.sleep(0)
+
+    assert agent._pipeline_task.queued == []  # type: ignore[union-attr]
+    assert EventType.TESTER_TRANSCRIPT not in [event.type for event in agent._events]
+
+
+async def test_armed_speak_drops_if_disconnected_at_fire_time():
+    from voicebox.events import VoiceboxEvent
+
+    agent = _agent_ready_to_speak()
+    agent._connected.clear()
+    start = len(agent._events)
+    await agent._emit(VoiceboxEvent(type=EventType.APP_BOT_SPEECH_STARTED, t=123.0))
+
+    await asyncio.wait_for(
+        agent._armed_speak("drop me", EventType.APP_BOT_SPEECH_STARTED.value, 0.0, start),
+        timeout=0.1,
+    )
+
+    assert agent._pipeline_task.queued == []  # type: ignore[union-attr]
+    assert [event.type for event in agent._events] == [
+        EventType.APP_BOT_SPEECH_STARTED,
+        EventType.TESTER_BARGE_IN_DROPPED,
+    ]
+    dropped = agent._events[-1]
+    assert dropped.triggered_by_t == 123.0  # type: ignore[attr-defined]
+    assert dropped.reason == "no_client_connected"  # type: ignore[attr-defined]
+
+
 def test_no_app_bot_turn_machinery_remains():
     assert not hasattr(agent_module, "TURN_STOP_TIMEOUT_SECS")
     assert not hasattr(agent_module, "LocalSmartTurnAnalyzerV3")

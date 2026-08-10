@@ -47,3 +47,18 @@ def test_armed_speak_deadline_is_flat():
         "word " * 200, wait_for_playout=True, wait_for_turn=False, when="app_bot_speech_started"
     )
     assert deadline == server.SPEAK_DEADLINE_BASE_SECS
+
+
+def test_wait_for_turn_child_timeout_precedes_parent_deadline():
+    deadline = server._speak_deadline(
+        "one two three", wait_for_playout=True, wait_for_turn=True, when=None
+    )
+    child_budget = (
+        server.CONNECT_GRACE_SECS
+        + agent_module.TURN_WAIT_TIMEOUT_SECS
+        + agent_module.PLAYOUT_TIMEOUT_SECS
+        + agent_module.PLAYOUT_SECS_PER_WORD * 3
+    )
+
+    assert deadline == child_budget + server.IPC_MARGIN_SECS
+    assert server.TURN_WAIT_TIMEOUT_SECS == agent_module.TURN_WAIT_TIMEOUT_SECS

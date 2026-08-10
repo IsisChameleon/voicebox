@@ -42,6 +42,7 @@ class EventType(str, Enum):
     TESTER_TRANSCRIPT = "tester_transcript"
     TESTER_BARGE_IN_ARMED = "tester_barge_in_armed"
     TESTER_BARGE_IN_FIRED = "tester_barge_in_fired"
+    TESTER_BARGE_IN_DROPPED = "tester_barge_in_dropped"
 
 
 class VoiceboxEvent(BaseModel):
@@ -93,10 +94,10 @@ class TesterTranscriptEvent(VoiceboxEvent):
     """The exact text the tester (us) spoke via ``speak()``.
 
     Unlike ``app_bot_transcript`` (recovered from audio via STT), this is the
-    ground-truth input string — exact, and emitted at speak time rather than
-    after batch STT. ``t`` is therefore the ``speak()`` call time by design:
-    NOT when the audio played (see ``tester_speech_started``/``stopped`` for
-    the playout span) and not an STT measurement.
+    ground-truth input string — exact, and emitted once speech is queued rather
+    than after batch STT. ``t`` is therefore queue time: not when the audio
+    played (see ``tester_speech_started``/``stopped`` for the playout span) and
+    not an STT measurement.
     """
 
     type: EventType = EventType.TESTER_TRANSCRIPT
@@ -128,3 +129,12 @@ class TesterBargeInFiredEvent(VoiceboxEvent):
     type: EventType = EventType.TESTER_BARGE_IN_FIRED
     when: str
     triggered_by_t: float
+
+
+class TesterBargeInDroppedEvent(VoiceboxEvent):
+    """An armed utterance was dropped because no browser client was connected."""
+
+    type: EventType = EventType.TESTER_BARGE_IN_DROPPED
+    when: str
+    triggered_by_t: float
+    reason: str = "no_client_connected"

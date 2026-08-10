@@ -26,10 +26,19 @@ jobs:
           version: "latest"
 
       - name: Set up Python
-        run: uv python install 3.10
+        run: uv python install 3.11
 
       - name: Install development dependencies
         run: uv sync --group dev
+
+      - name: Run tests
+        run: uv run pytest
+
+      - name: Run shim tests
+        run: node --test tests/shim_pending_inbound.test.mjs
+
+      - name: Run type checking
+        run: uv run pyright src/voicebox
 
       - name: Build project
         run: uv build

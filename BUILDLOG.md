@@ -813,3 +813,21 @@ voicebox at.
 **Rejected:** hosting it as a product demo outside `tests/` (it's a fixture);
 a local-LLM fallback in v1; test-harness features inside the app (voicebox is
 the harness — the app must stay "any web voice app", no cheating channel).
+
+## D28 — Salvage only live defects from stale PRs #9 and #10
+
+*2026-08-10. Branch `fix/runtime-safety-ci-docs`.*
+
+- **Decided:** reimplement six still-live fixes against current `main`: truthful
+  connection state, bounded speak waits, disconnected barge-in diagnostics,
+  bounded pre-microphone audio buffering, Python 3.11 test/type-check CI, and
+  corrections to the living architecture diagram.
+- **Why:** each defect is observable on current `main`; the original PRs now
+  conflict with substantial later audio-pipeline work and cannot be merged
+  safely.
+- **Decided:** every slice records a red test or executable check before its
+  production change, then records the green result after the smallest fix.
+- **Rejected:** cherry-picking either stale PR. Their readiness, README, test,
+  and pipeline changes have been superseded.
+- **Rejected:** adding a `pipecat-ai` upper bound without a demonstrated
+  incompatibility. The lockfile already makes current installs reproducible.

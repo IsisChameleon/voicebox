@@ -29,6 +29,9 @@
   // Kokoro → fake-mic playback (browser side): stay at 48 kHz to match
   // the page's native AudioContext and avoid quality loss.
   const MIC_RATE = 48000;
+  // Keep a short startup cushion for apps that request their microphone after
+  // the audio socket connects, without retaining AudioData indefinitely.
+  const MAX_PENDING_INBOUND_FRAMES = MIC_RATE * 3;
   // Remote-track → pipecat tap: Whisper-MLX expects 16 kHz audio
   // (mlx_whisper.transcribe has no sample_rate parameter — it always
   // treats input as 16 kHz). Capture at 16 kHz here so we don't have to
@@ -44,6 +47,10 @@
     pcHookInstalled: false,
     wsReady: false,
     inboundChunks: 0,
+    pendingInboundFrames: 0,
+    maxPendingInboundFrames: MAX_PENDING_INBOUND_FRAMES,
+    droppedInboundChunks: 0,
+    droppedInboundFrames: 0,
     outboundChunks: 0,
     audioWsUrl: AUDIO_WS_URL,
     pcCount: 0,
@@ -76,6 +83,18 @@
   // all live writers instead of only the most recent one.
   const micWriters = new Set();
   let pendingInbound = [];
+
+  function queuePendingInbound(frame) {
+    pendingInbound.push(frame);
+    diag.pendingInboundFrames += frame.numberOfFrames;
+    while (diag.pendingInboundFrames > MAX_PENDING_INBOUND_FRAMES) {
+      const discarded = pendingInbound.shift();
+      diag.pendingInboundFrames -= discarded.numberOfFrames;
+      diag.droppedInboundChunks++;
+      diag.droppedInboundFrames += discarded.numberOfFrames;
+      discarded.close();
+    }
+  }
 
   // AudioData is consumed by write(), so each additional writer gets a
   // clone. A failed write means the page stopped that track's generator —
@@ -129,7 +148,7 @@
         if (micWriters.size > 0) {
           writeToMicWriters(frame);
         } else {
-          pendingInbound.push(frame);
+          queuePendingInbound(frame);
         }
         diag.inboundChunks++;
       } catch (e) {
@@ -146,6 +165,7 @@
     diag.micTrackCount = micWriters.size;
     for (const f of pendingInbound) writer.write(f).catch(() => {});
     pendingInbound = [];
+    diag.pendingInboundFrames = 0;
     console.log(TAG, 'created synthetic mic stream', { liveMicTracks: micWriters.size });
     return new MediaStream([generator]);
   }
