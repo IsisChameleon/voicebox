@@ -6,7 +6,7 @@ Status: complete
 |---|---|---|---|
 | T1 — truthful connection state, bounded waits, and dropped barge-ins | `1fa93c7` | ✅ | [T1 evidence](../artefacts/fix-runtime-safety-ci-docs/t1-speech-lifecycle-safety.md) |
 | T2 — bounded pre-microphone audio buffer | `1fa93c7` | ✅ | [T2 evidence](../artefacts/fix-runtime-safety-ci-docs/t2-shim-buffer-bound.md) |
-| T3 — Python 3.11 test and type-check CI | `1fa93c7` | ✅ | [T3 evidence](../artefacts/fix-runtime-safety-ci-docs/t3-ci-contract.md) |
+| T3 — Python 3.11 test and type-check CI | `1fa93c7`, `b0d5330` | ✅ | [T3 evidence](../artefacts/fix-runtime-safety-ci-docs/t3-ci-contract.md) |
 | T4 — current architecture-diagram instructions | `1fa93c7` | ✅ | [T4 evidence](../artefacts/fix-runtime-safety-ci-docs/t4-diagram-contract.md) |
 
 ## T1 — truthful connection state, bounded waits, and dropped barge-ins
@@ -28,8 +28,8 @@ Status: complete
 ## T3 — Python 3.11 test and type-check CI
 
 - All workflows install Python 3.11.
-- The build requires Python tests, the Node shim test, and Pyright over production
-  source.
+- The build installs Chromium, then requires Python tests, the Node shim test,
+  and Pyright over production source.
 - Try it: `uv run pytest -q tests/test_ci_docs_contract.py`.
 - Not covered: an Actions-hosted run before push.
 
