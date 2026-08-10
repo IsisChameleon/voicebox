@@ -35,7 +35,7 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox ────multiprocessing.Queue�
 
 - Python ≥ 3.11
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
-- A browser-based voice app to point it at (e.g. a locally-running Next.js / Svelte app on `localhost:3000`)
+- A browser-based voice app to point it at — any `getUserMedia` + WebRTC app works. The repo bundles one to try it against: `tests/eval/fake_app/` (`uv sync --extra eval`, serves on `localhost:7860`)
 
 By default the agent uses local models — Whisper for STT, Kokoro for TTS — so no API keys are needed.
 
@@ -148,7 +148,7 @@ so subtract it before quoting any latency number.
 
 ```jsonc
 // 1. launch a Playwright Chromium with the audio shim injected, navigate to the app
-{"name": "start_browser_session", "arguments": {"url": "http://localhost:3000"}}
+{"name": "start_browser_session", "arguments": {"url": "http://localhost:7860"}}
 // → {"cdp_endpoint": "http://localhost:9222", "audio_ws_url": "ws://localhost:9091"}
 
 // 2. attach a Playwright client to that cdp_endpoint and drive the UI
@@ -199,11 +199,12 @@ so subtract it before quoting any latency number.
 | `raw_pcm_serializer.py` | Tiny `FrameSerializer` that exchanges raw 16-bit LE mono PCM with the browser shim — no protobuf, no envelope. |
 | `shim.js` | The browser shim. Injected via Playwright `addInitScript` so it runs before any page code. Overrides `getUserMedia` to return a synthetic mic stream backed by `MediaStreamTrackGenerator`, and wraps `RTCPeerConnection` to tap every inbound audio track via Web Audio (`MediaStreamAudioSourceNode → AudioWorkletNode`) back to the server. |
 | `browser_session.py` | Manages the Playwright child process: launches Chromium with `--remote-debugging-port=<cdp_port>` + `--use-fake-ui-for-media-stream`, registers `shim.js` via `add_init_script`, navigates to the user-supplied URL, parks until told to stop. |
+| `tests/eval/fake_app/` | Bundled fake voice app ("Nova", plain pipecat, `localhost:7860`) — the in-repo target for live sessions; see its README. |
 
 ### What happens on `start_browser_session`
 
 ```
-1.  Claude → MCP                   tools/call start_browser_session(url="http://localhost:3000")
+1.  Claude → MCP                   tools/call start_browser_session(url="http://localhost:7860")
 2.  server.py:start_browser_session()
                                    audio_ws_url = "ws://localhost:9091"
                                    start_pipecat_process(BrowserShimRunnerArguments(port=9091, …))
@@ -247,7 +248,7 @@ so subtract it before quoting any latency number.
 - **VAD `stop_secs=1.0s`** captures complete utterances over WebRTC with natural pauses; pipecat's default 0.2 s (tuned for clean TTS sources) chops remote speech mid-sentence.
 - **The shim taps audio via Web Audio, not WebCodecs**, because `MediaStreamTrackProcessor` only emits chunks during active speech on a remote WebRTC track — silence is dropped, so a sparse byte stream reaches pipecat and the recorded WAV plays back several times faster than real time. Web Audio is pulled by the AudioContext clock and fills silence with zero samples.
 - **Headless Chromium works, audio path included** — `headless=true` still captures the bot's audio and feeds the synthetic mic (the tap is Web Audio, not a visible window). The shim relies on Web Audio + `MediaStreamTrackGenerator` (modern Chromium-only). Tested with Playwright 1.50 + bundled Chromium.
-- **`RTCPeerConnection` wrap won't catch peer connections inside cross-origin iframes or Web Workers.** Not an issue for the readme app, but a real limitation for apps using Daily Prebuilt's `<DailyIframe>` (workaround: hook `<audio>` elements via `MutationObserver` + `captureStream()`).
+- **`RTCPeerConnection` wrap won't catch peer connections inside cross-origin iframes or Web Workers.** Not an issue for main-frame apps (like the bundled fake app), but a real limitation for apps using Daily Prebuilt's `<DailyIframe>` (workaround: hook `<audio>` elements via `MutationObserver` + `captureStream()`).
 - **One session at a time.** The server pins ports 9090 (MCP), 9091 (audio WS), 9222 (CDP). `start_browser_session` checks `audio_port`/`cdp_port` are free first and fails with a clear message if not — pass overrides to run a second session in parallel.
 - **Session reuse uses `user_data_dir`.** A persistent profile lives in the browser's *default* context, which is exactly what a CDP-attached client sees — so logging in once persists across runs with no save step. (Playwright's `storage_state` JSON is deliberately *not* supported: it loads into a separate non-default context that a CDP-attached client can't save back, so it can't be generated from within a session — a persistent profile does the job without that footgun.)
 - We pre-grant `microphone` permission via `--use-fake-ui-for-media-stream`. No permission prompt to dismiss.
