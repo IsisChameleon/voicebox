@@ -4,10 +4,10 @@ Status: complete
 
 | Task | Commit | Status | Evidence |
 |---|---|---|---|
-| T1 — truthful connection state, bounded waits, and dropped barge-ins | integration commit | ✅ | [T1 evidence](../artefacts/fix-runtime-safety-ci-docs/t1-speech-lifecycle-safety.md) |
-| T2 — bounded pre-microphone audio buffer | integration commit | ✅ | [T2 evidence](../artefacts/fix-runtime-safety-ci-docs/t2-shim-buffer-bound.md) |
-| T3 — Python 3.11 test and type-check CI | integration commit | ✅ | [T3 evidence](../artefacts/fix-runtime-safety-ci-docs/t3-ci-contract.md) |
-| T4 — current architecture-diagram instructions | integration commit | ✅ | [T4 evidence](../artefacts/fix-runtime-safety-ci-docs/t4-diagram-contract.md) |
+| T1 — truthful connection state, bounded waits, and dropped barge-ins | `1fa93c7` | ✅ | [T1 evidence](../artefacts/fix-runtime-safety-ci-docs/t1-speech-lifecycle-safety.md) |
+| T2 — bounded pre-microphone audio buffer | `1fa93c7` | ✅ | [T2 evidence](../artefacts/fix-runtime-safety-ci-docs/t2-shim-buffer-bound.md) |
+| T3 — Python 3.11 test and type-check CI | `1fa93c7` | ✅ | [T3 evidence](../artefacts/fix-runtime-safety-ci-docs/t3-ci-contract.md) |
+| T4 — current architecture-diagram instructions | `1fa93c7` | ✅ | [T4 evidence](../artefacts/fix-runtime-safety-ci-docs/t4-diagram-contract.md) |
 
 ## T1 — truthful connection state, bounded waits, and dropped barge-ins
 
