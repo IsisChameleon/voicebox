@@ -1,0 +1,35 @@
+# T3 — Continuous integration contract evidence
+
+Success criteria: use supported Python 3.11 in every workflow and require the
+Python tests, shim test, and production-source type check on pull requests.
+
+## Red
+
+- Initial command, before workflow edits:
+
+```bash
+UV_CACHE_DIR=/tmp/voicebox-uv-cache uv run pytest -q tests/test_ci_docs_contract.py
+```
+
+- Result: `8 failed`.
+- Failures covered three Python 3.10 workflow pins, missing `pytest`, and three
+  stale diagram contracts.
+- Adding the shim-test contract separately produced `1 failed, 8 passed` until
+  the Node test became a required build step.
+- The first GitHub Actions run then failed two existing live-browser tests
+  because Chromium was absent. Adding the browser-install contract first
+  produced `1 failed, 9 passed` locally.
+
+## Green
+
+- Contract test after the Actions finding: `10 passed`.
+- The required build installs Chromium before running the two live-browser
+  tests.
+- `uv run ruff check`: passed.
+- `uv run ruff format --check`: `32 files already formatted`.
+
+## Not covered
+
+- The workflow was not executed inside GitHub Actions before push.
+- The quality workflow uses Ruff exclusively; a contract test rejects the
+  unapproved type checker from active project surfaces.

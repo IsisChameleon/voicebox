@@ -64,6 +64,7 @@ from voicebox.events import (
     EventType,
     SessionStartedEvent,
     TesterBargeInArmedEvent,
+    TesterBargeInDroppedEvent,
     TesterBargeInFiredEvent,
     TesterTranscriptEvent,
     TranscriptEvent,
@@ -77,6 +78,12 @@ from voicebox.processors.nonblocking_whisper_stt import (
 )
 from voicebox.raw_pcm_serializer import RawPCMSerializer
 from voicebox.runner_args import BrowserShimRunnerArguments
+from voicebox.timeouts import (
+    CONNECT_GRACE_SECS,
+    PLAYOUT_SECS_PER_WORD,
+    PLAYOUT_TIMEOUT_SECS,
+    TURN_WAIT_TIMEOUT_SECS,
+)
 from voicebox.timing import TimedSTTMixin
 
 load_dotenv(override=True)
@@ -87,22 +94,16 @@ load_dotenv(override=True)
 # consumers can subtract it.
 VAD_STOP_SECS = 1.0
 
-# Max seconds speak(wait_for_playout=True) waits for our audio to finish playing
-# out. Short on purpose: expiry is now a diagnosis handed back to the caller
-# (played=False plus a reason), not an exception, so waiting minutes to raise
-# something uninformative buys nothing.
-PLAYOUT_TIMEOUT_SECS = 30.0
 
-# Per-word extension of the playout window. TOKEN aggregation (D17) synthesizes
+# The shared playout budget is short on purpose: expiry is a diagnosis handed
+# back to the caller (played=False plus a reason), not an exception. Its
+# per-word extension accounts for TOKEN aggregation (D17), which synthesizes
 # the whole utterance before any audio plays, so time-to-playout-end is roughly
 # 2x the audio duration under STT CPU contention (round 7: a healthy 61-word
 # speak hit playout end 36.2 s after queueing — past a flat 30 s window).
 # Kokoro af_heart measures ~0.3 s of audio per word; 0.8 s/word budgets ~2x
-# that on top of the base. Mirrored (not imported) in server.py's IPC deadline,
-# which must outlive this window (D15).
-PLAYOUT_SECS_PER_WORD = 0.8
-
-
+# that on top of the base. server.py derives its IPC deadline from these same
+# shared constants so it must outlive the child window (D15).
 # The STT services are composed from two mixins, in this order:
 #   NonBlockingSegmentedSTT — transcribes on a worker, off the frame task.
 #   TimedSTTMixin           — Phase 0 instrumentation: brackets the wrapped
@@ -113,7 +114,7 @@ PLAYOUT_SECS_PER_WORD = 0.8
 # processors/nonblocking_whisper_stt.py.
 #
 # Both classes carry `# type: ignore[misc]`: each Whisper service re-declares
-# `_settings` with its own nested Settings type, which pyright reads as
+# `_settings` with its own nested Settings type, which static analyzers read as
 # conflicting with the STTService declaration that reaches the class through
 # NonBlockingSegmentedSTT. The MRO resolves it to the concrete service's at
 # runtime; nothing here changes that.
@@ -513,8 +514,7 @@ class PipecatMCPAgent:
 
         @self._transport.event_handler("on_client_disconnected")
         async def on_disconnected(transport, client):
-            logger.info("Client disconnected")
-            await self._emit(VoiceboxEvent(type=EventType.CLIENT_DISCONNECTED))
+            await self._on_client_disconnected()
 
         # Log header: consumers of app_bot_speech_stopped timings need the
         # built-in VAD lag to subtract it.
@@ -808,6 +808,9 @@ class PipecatMCPAgent:
         Raises:
             ValueError: If both ``when`` and ``wait_for_turn`` are set, or if
                 ``when`` is not a valid ``EventType`` value.
+            RuntimeError: If the browser does not connect within the grace
+                period, or the app bot does not fall silent within the bounded
+                ``wait_for_turn`` window.
 
         """
         if when is not None and wait_for_turn:
@@ -836,7 +839,7 @@ class PipecatMCPAgent:
             )
             return {"armed": True}
 
-        await self._connected.wait()
+        await self._wait_for_connection()
 
         # Distinguishes the polite path's result from the ungated one (round-1
         # ergonomics finding): how long the turn gate actually blocked.
@@ -846,12 +849,9 @@ class PipecatMCPAgent:
             await self._wait_for_app_bot_silent()
             turn_wait["waited_for_turn_secs"] = round(time.monotonic() - wait_started, 3)
 
-        # Log what we said (ground-truth input, not STT) so the event stream is
-        # a complete two-sided transcript.
-        await self._emit(TesterTranscriptEvent(text=text))
-
         if not wait_for_playout:
             await self._queue_speak_frames(text)
+            await self._emit(TesterTranscriptEvent(text=text))
             return {"queued": True, **turn_wait}
 
         # One tracked playout at a time: the tester's speaking frames carry no
@@ -864,6 +864,7 @@ class PipecatMCPAgent:
             self._playout = _Playout(skip_tts_stops=self._tts_pending)
             try:
                 await self._queue_speak_frames(text)
+                await self._emit(TesterTranscriptEvent(text=text))
                 result = await asyncio.wait_for(self._playout.future, timeout=playout_window)
             except asyncio.TimeoutError:
                 # The audio was queued; what failed is the evidence that it
@@ -885,10 +886,34 @@ class PipecatMCPAgent:
                 self._playout = None
         return {"queued": True, "played": True, **result, **turn_wait}
 
+    async def _wait_for_connection(self):
+        """Wait briefly for a browser client, then refuse the utterance."""
+        try:
+            await asyncio.wait_for(self._connected.wait(), timeout=CONNECT_GRACE_SECS)
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                "no browser client connected to the audio WebSocket; "
+                "has the page called getUserMedia()?"
+            ) from None
+
     async def _wait_for_app_bot_silent(self):
-        """Block until the app bot is not currently speaking."""
-        async with self._event_cond:
-            await self._event_cond.wait_for(lambda: not self._app_bot_speaking)
+        """Wait boundedly for silence so a failed call cannot speak later."""
+        try:
+            async with self._event_cond:
+                await asyncio.wait_for(
+                    self._event_cond.wait_for(lambda: not self._app_bot_speaking),
+                    timeout=TURN_WAIT_TIMEOUT_SECS,
+                )
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                f"app bot did not fall silent within {TURN_WAIT_TIMEOUT_SECS}s (wait_for_turn)"
+            ) from None
+
+    async def _on_client_disconnected(self):
+        """Record a disconnect and make current connection state truthful."""
+        logger.info("Client disconnected")
+        self._connected.clear()
+        await self._emit(VoiceboxEvent(type=EventType.CLIENT_DISCONNECTED))
 
     async def _armed_speak(self, text: str, when: str, timer_secs: float, start: int):
         """Background trigger: wait for the next ``when`` event, then speak.
@@ -906,16 +931,20 @@ class PipecatMCPAgent:
             triggered = next(e for e in self._events[start:] if e.type == when)
 
         await asyncio.sleep(timer_secs)
-        await self._connected.wait()
+        if not self._connected.is_set():
+            await self._emit(TesterBargeInDroppedEvent(when=when, triggered_by_t=triggered.t))
+            return
 
         await self._emit(TesterBargeInFiredEvent(when=when, triggered_by_t=triggered.t))
-        await self._emit(TesterTranscriptEvent(text=text))
         await self._queue_speak_frames(text)
+        await self._emit(TesterTranscriptEvent(text=text))
 
     async def _queue_speak_frames(self, text: str):
         """Push the LLM-response frame triplet that drives TTS."""
         if not self._pipeline_task:
             raise RuntimeError("Pipecat MCP Agent not initialized")
+        if not self._connected.is_set():
+            raise RuntimeError("browser client disconnected before speech could be queued")
         self._tts_pending += 1
         await self._pipeline_task.queue_frames(
             [

@@ -63,7 +63,6 @@ so the conditional follow-up stays off), and surfaced the 5 s turn-stop watchdog
 ```bash
 uv run pytest -q                     # whole suite
 uv run ruff check src/ tests/ && uv run ruff format --check src/ tests/
-uv run pyright src/
 ```
 
 ---

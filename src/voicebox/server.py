@@ -24,6 +24,13 @@ from mcp.server.fastmcp import FastMCP
 from voicebox.agent_ipc import send_command, start_pipecat_process, stop_pipecat_process
 from voicebox.browser_session import start_browser, stop_browser
 from voicebox.runner_args import BrowserShimRunnerArguments
+from voicebox.timeouts import (
+    CONNECT_GRACE_SECS,
+    IPC_MARGIN_SECS,
+    PLAYOUT_SECS_PER_WORD,
+    PLAYOUT_TIMEOUT_SECS,
+    TURN_WAIT_TIMEOUT_SECS,
+)
 
 logger.remove()
 logger.add(sys.stderr, level="DEBUG")
@@ -44,13 +51,8 @@ mcp = FastMCP(
 # tests/test_server_deadlines.py, so drift fails the suite instead of
 # re-introducing the round-4 reap-mid-drain bug (D15).
 SPEAK_DEADLINE_BASE_SECS = 60.0
-# Heuristic bound on speak(wait_for_turn=True): the agent-side wait for the
-# app bot to fall silent is unbounded (the app decides), so this caps how long
-# the parent will hold the HTTP call open for it.
-TURN_WAIT_DEADLINE_SECS = 150.0
-# Mirrors agent.PLAYOUT_SECS_PER_WORD (0.8): the agent's playout window is
-# 30 s + 0.8 s/word, and the base already carries a 30 s margin over it.
-PLAYOUT_DEADLINE_SECS_PER_WORD = 0.8
+# Shared with the child: its playout window is 30 s + 0.8 s/word.
+PLAYOUT_DEADLINE_SECS_PER_WORD = PLAYOUT_SECS_PER_WORD
 # Must outlive the agent's STT drain (DRAIN_CAP_SECS = 180 in
 # processors/nonblocking_whisper_stt.py) plus settle + artifact writing. At
 # the old 30 s this timed out mid-drain and the child was reaped BEFORE it
@@ -82,10 +84,12 @@ def _speak_deadline(
     """
     if when is not None:
         return SPEAK_DEADLINE_BASE_SECS  # armed, returns immediately
-    deadline = TURN_WAIT_DEADLINE_SECS if wait_for_turn else SPEAK_DEADLINE_BASE_SECS
+    child_budget = CONNECT_GRACE_SECS
+    if wait_for_turn:
+        child_budget += TURN_WAIT_TIMEOUT_SECS
     if wait_for_playout:
-        deadline += PLAYOUT_DEADLINE_SECS_PER_WORD * len(text.split())
-    return deadline
+        child_budget += PLAYOUT_TIMEOUT_SECS + PLAYOUT_DEADLINE_SECS_PER_WORD * len(text.split())
+    return max(SPEAK_DEADLINE_BASE_SECS, child_budget + IPC_MARGIN_SECS)
 
 
 def _assert_port_free(port: int, name: str):
@@ -241,12 +245,15 @@ async def listen(timeout: float = 30.0, cursor: int = 0) -> dict:
         ``tester_speech_interrupted`` — OUR synthetic voice starting /
         finishing / being cut off at playout.
       * ``tester_transcript`` — the exact text WE spoke (``text``); the
-        ground-truth ``speak()`` input. Its ``t`` is the ``speak()`` CALL
-        time — not playout and not an STT result (playout start/end are the
+        ground-truth ``speak()`` input, emitted only after it is queued. Its
+        ``t`` is queue time — not playout and not an STT result (playout start/end are the
         ``tester_speech_*`` events).
       * ``tester_barge_in_armed`` / ``tester_barge_in_fired`` — a
         ``speak(when=...)`` trigger was registered / just fired (``fired``
         carries ``triggered_by_t``, the ``t`` of the event that tripped it).
+      * ``tester_barge_in_dropped`` — an armed trigger fired while the browser
+        client was disconnected, so its audio was discarded; carries
+        ``triggered_by_t`` and ``reason=no_client_connected``.
 
     To simply wait for the next thing the app bot says: call in a loop with
     the advancing cursor and act on ``app_bot_transcript`` events.
