@@ -1,3 +1,9 @@
+#
+# Copyright (c) 2026, Daily
+#
+# SPDX-License-Identifier: BSD 2-Clause License
+#
+
 """Keep generated utterances contiguous when synthesis produces delayed chunks."""
 
 from collections import deque
