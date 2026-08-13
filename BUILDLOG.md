@@ -848,3 +848,20 @@ review of PR #21.*
   name and fails if it returns.
 - **Rejected:** retaining Pyright as a non-blocking check. An unused second
   analyzer adds dependency and policy noise without serving the project.
+
+## D30 — Gap-free playout is a generated-audio pipeline policy
+
+*2026-08-12. Issue #19.*
+
+- **Decided:** use pipecat's stock `KokoroTTSService` with TOKEN aggregation and place a
+  `GeneratedUtteranceAudioBuffer` immediately after TTS in the tester pipeline.
+- **Why:** one contiguous synthetic-microphone utterance is a Voicebox playout invariant, not a
+  Kokoro implementation detail. The processor removes the fork-by-copy and applies the policy at
+  the boundary that owns it.
+- **Decided:** warm-up consumes the stock service's public `run_tts` stream; no private Kokoro
+  fields or subclass are required. Nova also uses stock Kokoro without Voicebox's tester-side
+  buffer, preserving reference-instrument independence.
+- **Failure contract:** synthesis error, interruption, cancellation, or pipeline end discards any
+  generated audio that has not reached the transport.
+- **Rejected:** a smaller Kokoro subclass (still couples policy to provider internals) and blank
+  audio insertion (silence remains silence to the target application's VAD).

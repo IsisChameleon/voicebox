@@ -46,7 +46,8 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
 | `src/voicebox/timing.py` | `log_duration` + mixins timing STT / turn-analyzer calls at DEBUG (`voicebox.timing` lines). |
 | `src/voicebox/runner_args.py` | `BrowserShimRunnerArguments` dataclass (host, port, mic_rate, tap_rate, record_dir). Pipecat ships none for plain WS-server transports. |
 | `src/voicebox/raw_pcm_serializer.py` | Tiny `FrameSerializer`: raw 16-bit LE mono PCM, no protobuf/envelope. |
-| `src/voicebox/processors/kokoro_tts.py` | Kokoro TTS service (`voice_id="af_heart"`, TOKEN aggregation, `warm_up`). |
+| `src/voicebox/processors/generated_utterance_audio_buffer.py` | Holds stock-Kokoro audio chunks until `TTSStoppedFrame`, then releases one gap-free span; discards unplayed audio on error/interruption (D30). |
+| `src/voicebox/processors/tts.py` | `warm_up_tts_service` — consumes one throwaway synthesis at startup to pay the lazy model cost off the conversation. |
 | `src/voicebox/processors/nonblocking_whisper_stt.py` | `NonBlockingSegmentedSTT` — Whisper off the frame task (one worker, ordered), eager decode, drain + `transcription_lag_secs`. |
 | `src/voicebox/shim.js` | The browser shim, injected via `addInitScript` before page code. Overrides `getUserMedia` (Hook 1) and wraps `RTCPeerConnection` (Hook 2). Diagnostics on `window.__voiceShim`. |
 | `src/voicebox/browser_session.py` | Manages the Playwright child process. Supports `user_data_dir` (persistent default context, CDP-coherent — exposed via `start_browser_session` for session reuse). See the CDP context-split trap below for why `storage_state` is intentionally not offered. |

@@ -41,12 +41,11 @@ from pipecat.processors.aggregators.llm_response_universal import LLMContextAggr
 from pipecat.processors.audio.vad_processor import VADProcessor
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.runner.types import RunnerArguments, SmallWebRTCRunnerArguments
+from pipecat.services.kokoro.tts import KokoroTTSService
 from pipecat.services.whisper.stt import WhisperSTTService
 from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.workers.runner import WorkerRunner
-
-from voicebox.processors.kokoro_tts import KokoroTTSService
 
 load_dotenv()
 
@@ -158,7 +157,7 @@ async def bot(runner_args: RunnerArguments):
             ),
             aggregators.user(),
             create_brain(),
-            KokoroTTSService(voice_id="am_michael"),
+            KokoroTTSService(settings=KokoroTTSService.Settings(voice="am_michael")),
             transport.output(),
             aggregators.assistant(),
         ]
