@@ -86,6 +86,7 @@ from voicebox.timeouts import (
     CONNECT_GRACE_SECS,
     PLAYOUT_SECS_PER_WORD,
     PLAYOUT_TIMEOUT_SECS,
+    TTS_STOP_FRAME_TIMEOUT_SECS,
     TURN_WAIT_TIMEOUT_SECS,
 )
 from voicebox.timing import TimedSTTMixin
@@ -483,7 +484,9 @@ class PipecatMCPAgent:
         # speak() isn't split by ~5 s of one-time inference cost (round 5).
         # Runs concurrently with the browser child's own startup; a speak()
         # arriving first just queues behind it on the executor, no worse than
-        # the cold path it replaces.
+        # the cold path it replaces. The helper parks until the StartFrame
+        # queued below gives the service its sample rate — synthesizing before
+        # that fails, so the spawn deliberately outlives this function.
         self._spawn_task(warm_up_tts_service(tts), "kokoro_warm_up")
 
         assistant_aggregator = self._create_assistant_aggregator()
@@ -982,6 +985,7 @@ class PipecatMCPAgent:
         return KokoroTTSService(
             settings=KokoroTTSService.Settings(voice="af_heart"),
             text_aggregation_mode=TextAggregationMode.TOKEN,
+            stop_frame_timeout_s=TTS_STOP_FRAME_TIMEOUT_SECS,
         )
 
     def _create_vad_processor(self) -> VADProcessor:

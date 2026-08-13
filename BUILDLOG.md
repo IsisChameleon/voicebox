@@ -865,3 +865,39 @@ review of PR #21.*
   generated audio that has not reached the transport.
 - **Rejected:** a smaller Kokoro subclass (still couples policy to provider internals) and blank
   audio insertion (silence remains silence to the target application's VAD).
+
+## D31 — Adopting a stock service means adopting its timers
+
+*2026-08-13. Issue #19, review of D30's implementation.*
+
+- **Context:** D30's code passed 111 unit tests and did not work. Three defects, all in the gap
+  between "subclass the stock service" and pipecat 1.3.0's actual frame routing.
+- **Decided:** pass `stop_frame_timeout_s=TTS_STOP_FRAME_TIMEOUT_SECS` (120 s) when constructing
+  the stock Kokoro service.
+- **Why:** `push_stop_frames=True` (which the stock service sets for us) makes the base class push
+  a `TTSStoppedFrame` after `stop_frame_timeout_s` of silence on an open audio context — 3.0 s by
+  default, sized for streaming HTTP providers. Kokoro under TOKEN aggregation synthesizes the
+  *whole* utterance before yielding anything: measured 4.2 s to first chunk for three sentences
+  and **19.1 s for six**. The premature stop broke three things at once — it disarmed
+  `GeneratedUtteranceAudioBuffer` before any audio arrived (playout silently unbuffered again,
+  i.e. the bug D30 existed to fix), it reached `_PipelineEventObserver` as a *second*
+  `TTSStoppedFrame` per `speak()` so `_tts_pending` decremented twice per increment, and it set
+  `_Playout._tts_finished` before a sample had played.
+- **Rejected:** having the buffer swallow a `TTSStoppedFrame` that arrives with an empty buffer.
+  The observer watches *every* processor→processor push (`agent.py:_PipelineEventObserver`), so it
+  counts the premature frame at the TTS→buffer hop before the buffer could drop it — the guard
+  cannot fix the bookkeeping half, and it would hang an utterance that legitimately yields no
+  audio. Suppressing the frame at its source is the only fix that addresses all three symptoms.
+- **Decided:** the buffer inspects `ErrorFrame` before its direction shortcut.
+- **Why:** D30's failure contract was unreachable code. `TTSService` reports synthesis failure via
+  `push_error_frame`, which pushes the frame **upstream** (`frame_processor.py:push_error_frame`);
+  upstream of the TTS service is the STT, not our buffer. Its test fed the `ErrorFrame` downstream
+  — a direction production never produces — so it passed against absent behaviour.
+- **Decided:** `warm_up_tts_service` waits for `tts.sample_rate` before synthesizing.
+- **Why:** `TTSService.sample_rate` is 0 until the pipeline's `StartFrame` arrives, and the
+  service resamples every chunk to it, so the warm-up failed **every session** with "Sample rate
+  should be over 0" — *yielded* as an `ErrorFrame`, never raised, and discarded by the helper's
+  `async for … pass`. The ~5 s first-inference cost D16 removed had silently returned.
+- **Lesson recorded:** all three were invisible to unit tests and all three were visible in the
+  first live run. #19's verification bar ("unit tests cannot see this class of bug") was correct,
+  and D30 landed with it unmet. A green suite is not evidence for a frame-timing contract.

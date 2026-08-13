@@ -79,16 +79,23 @@ async def test_non_generated_and_upstream_frames_pass_through_unchanged():
 
 
 async def test_synthesis_error_discards_a_partial_generated_utterance():
+    # The ErrorFrame must travel UPSTREAM, the direction production actually
+    # produces: TTSService reports failure via push_error_frame, which pushes
+    # upstream. An earlier version of this test pushed it downstream, so it
+    # passed against a discard branch that could never run in production.
     processor = _CaptureBuffer()
     started = TTSStartedFrame(context_id="utterance")
     partial_audio = _audio(1)
     error = ErrorFrame("synthesis failed")
     stopped = TTSStoppedFrame(context_id="utterance")
 
-    for frame in (started, partial_audio, error, stopped):
-        await processor.process_frame(frame, FrameDirection.DOWNSTREAM)
+    await processor.process_frame(started, FrameDirection.DOWNSTREAM)
+    await processor.process_frame(partial_audio, FrameDirection.DOWNSTREAM)
+    await processor.process_frame(error, FrameDirection.UPSTREAM)
+    await processor.process_frame(stopped, FrameDirection.DOWNSTREAM)
 
     assert [frame for frame, _ in processor.pushed] == [started, error, stopped]
+    assert not any(isinstance(frame, TTSAudioRawFrame) for frame, _ in processor.pushed)
 
 
 async def test_interruption_discards_generated_audio_that_has_not_reached_playout():
@@ -119,6 +126,8 @@ async def test_warm_up_consumes_the_service_stream_without_forwarding_audio():
     consumed: list[str] = []
 
     class _StreamingTTS:
+        sample_rate = 48000
+
         async def run_tts(self, text: str, context_id: str):
             consumed.append(f"started:{text}:{context_id}")
             yield _audio(1, context_id)
@@ -127,3 +136,32 @@ async def test_warm_up_consumes_the_service_stream_without_forwarding_audio():
     await warm_up_tts_service(_StreamingTTS())  # type: ignore[arg-type]
 
     assert consumed == ["started:Ready.:voicebox-warm-up", "finished"]
+
+
+async def test_warm_up_waits_for_the_pipeline_to_set_a_sample_rate():
+    # TTSService.sample_rate stays 0 until StartFrame reaches it, and the
+    # service resamples every chunk to that rate. Warming up before then failed
+    # every session with "Sample rate should be over 0" — yielded as an
+    # ErrorFrame, never raised, so the warm-up looked like it had worked while
+    # the ~5 s first-inference cost stayed in the conversation.
+    synthesized_at_rate: list[int] = []
+
+    class _LateSampleRateTTS:
+        def __init__(self):
+            self.sample_rate = 0
+
+        async def run_tts(self, text: str, context_id: str):
+            synthesized_at_rate.append(self.sample_rate)
+            yield _audio(1, context_id)
+
+    tts = _LateSampleRateTTS()
+    warm_up = asyncio.create_task(warm_up_tts_service(tts))  # type: ignore[arg-type]
+    await asyncio.sleep(0.2)
+
+    assert not warm_up.done()
+    assert synthesized_at_rate == []  # parked, nothing synthesized at rate 0
+
+    tts.sample_rate = 48000  # what the pipeline's StartFrame does
+    await warm_up
+
+    assert synthesized_at_rate == [48000]
