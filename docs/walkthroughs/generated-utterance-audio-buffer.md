@@ -1,7 +1,9 @@
 # Walkthrough — `generated-utterance-audio-buffer`
 
-**Status: in review.** Pull Request (PR) [#23](https://github.com/IsisChameleon/voicebox/pull/23),
-closes [issue #19](https://github.com/IsisChameleon/voicebox/issues/19).
+**Status: complete.** Pull Request (PR)
+[#23](https://github.com/IsisChameleon/voicebox/pull/23), closes
+[issue #19](https://github.com/IsisChameleon/voicebox/issues/19). Reviewed by an independent
+agent before merge; its two findings are fixed in `22c68ca` and recorded in the task-3 artefact.
 
 Replaces the 220-line fork-by-copy Kokoro Text-to-Speech (TTS) module with pipecat's stock service
 plus a playout buffer, then makes the tests able to see whether that actually works.
@@ -18,6 +20,7 @@ tasks 3–4 were written as they landed.*
 | 2 | Fix the three defects the migration shipped with (found by `/code-review high`) | `3be9a4c`, `50313ed` | [t-2-review-fixes.md](../artefacts/generated-utterance-audio-buffer/t-2-review-fixes.md) | ✅ |
 | 3 | Buffer tests ported to real pipelines; warm-up onto the real service | `4ef5384` | [t-3-real-pipeline-tests-and-smoke.md](../artefacts/generated-utterance-audio-buffer/t-3-real-pipeline-tests-and-smoke.md) | ✅ |
 | 4 | `localhost:3000` removed; smoke scripts self-contained and able to fail | `c2fb0fd` | [t-3-real-pipeline-tests-and-smoke.md](../artefacts/generated-utterance-audio-buffer/t-3-real-pipeline-tests-and-smoke.md) | ✅ |
+| 5 | Independent review pass: two tests that could not fail, one crash path in the smoke script | `22c68ca` | [t-3-real-pipeline-tests-and-smoke.md](../artefacts/generated-utterance-audio-buffer/t-3-real-pipeline-tests-and-smoke.md) | ✅ |
 
 Decisions: [BUILDLOG](../../BUILDLOG.md) D30, D31, D32, D33.
 
