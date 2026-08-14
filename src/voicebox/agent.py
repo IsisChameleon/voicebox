@@ -53,8 +53,9 @@ from pipecat.processors.aggregators.llm_response_universal import LLMAssistantAg
 from pipecat.processors.audio.vad_processor import VADProcessor
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.runner.types import RunnerArguments
+from pipecat.services.kokoro.tts import KokoroTTSService
 from pipecat.services.stt_service import STTService
-from pipecat.services.tts_service import TTSService
+from pipecat.services.tts_service import TextAggregationMode, TTSService
 from pipecat.services.whisper.stt import WhisperSTTService, WhisperSTTServiceMLX
 from pipecat.transports.base_transport import BaseTransport
 from pipecat.workers.runner import WorkerRunner
@@ -71,17 +72,21 @@ from voicebox.events import (
     VoiceboxEvent,
 )
 from voicebox.metrics import compute_metrics
-from voicebox.processors.kokoro_tts import KokoroTTSService
+from voicebox.processors.generated_utterance_audio_buffer import (
+    GeneratedUtteranceAudioBuffer,
+)
 from voicebox.processors.nonblocking_whisper_stt import (
     EagerSegmentsWhisperModel,
     NonBlockingSegmentedSTT,
 )
+from voicebox.processors.tts import warm_up_tts_service
 from voicebox.raw_pcm_serializer import RawPCMSerializer
 from voicebox.runner_args import BrowserShimRunnerArguments
 from voicebox.timeouts import (
     CONNECT_GRACE_SECS,
     PLAYOUT_SECS_PER_WORD,
     PLAYOUT_TIMEOUT_SECS,
+    TTS_STOP_FRAME_TIMEOUT_SECS,
     TURN_WAIT_TIMEOUT_SECS,
 )
 from voicebox.timing import TimedSTTMixin
@@ -264,6 +269,7 @@ class PipecatMCPAgent:
         self._transport = transport
         self._record_dir = record_dir
         self._audio_buffer = None  # type: ignore[assignment]
+        self._generated_utterance_audio_buffer = GeneratedUtteranceAudioBuffer()
         # Set in start(); listen_events()/speak() start the agent before reading it.
         self._stt: NonBlockingSegmentedSTT = None  # type: ignore[assignment]
 
@@ -478,8 +484,10 @@ class PipecatMCPAgent:
         # speak() isn't split by ~5 s of one-time inference cost (round 5).
         # Runs concurrently with the browser child's own startup; a speak()
         # arriving first just queues behind it on the executor, no worse than
-        # the cold path it replaces.
-        self._spawn_task(tts.warm_up(), "kokoro_warm_up")
+        # the cold path it replaces. The helper parks until the StartFrame
+        # queued below gives the service its sample rate — synthesizing before
+        # that fails, so the spawn deliberately outlives this function.
+        self._spawn_task(warm_up_tts_service(tts), "kokoro_warm_up")
 
         assistant_aggregator = self._create_assistant_aggregator()
 
@@ -974,7 +982,11 @@ class PipecatMCPAgent:
         )
 
     def _create_tts_service(self) -> KokoroTTSService:
-        return KokoroTTSService(voice_id="af_heart")
+        return KokoroTTSService(
+            settings=KokoroTTSService.Settings(voice="af_heart"),
+            text_aggregation_mode=TextAggregationMode.TOKEN,
+            stop_frame_timeout_s=TTS_STOP_FRAME_TIMEOUT_SECS,
+        )
 
     def _create_vad_processor(self) -> VADProcessor:
         """Build the VAD stage that fronts the STT.
@@ -1019,6 +1031,7 @@ class PipecatMCPAgent:
             vad,
             stt,
             tts,
+            self._generated_utterance_audio_buffer,
             assistant_aggregator,
             self._transport.output(),
         ]

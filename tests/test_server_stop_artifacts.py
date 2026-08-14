@@ -1,9 +1,3 @@
-#
-# Copyright (c) 2026, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
-
 """stop() merges the browser child's shim artifacts into the report set (D22).
 
 The shim artifacts are written by the BROWSER child and returned by

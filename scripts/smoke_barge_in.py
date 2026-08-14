@@ -1,9 +1,3 @@
-#
-# Copyright (c) 2026, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
-
 """No-browser logic test for the Stage 3 barge-in scheduling.
 
 Exercises ``PipecatMCPAgent.speak``'s new modes (armed ``when`` trigger,

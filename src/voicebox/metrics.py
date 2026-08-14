@@ -1,9 +1,3 @@
-#
-# Copyright (c) 2026, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
-
 """Compute a test-report metrics dict from a voicebox conversation event log.
 
 Pure function: in = the serialized event log (the same dicts ``listen()``

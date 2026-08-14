@@ -85,7 +85,7 @@ def test_chromium_launch_failure_propagates(monkeypatch, tmp_path):
     started_at = time.monotonic()
     with pytest.raises(RuntimeError) as excinfo:
         browser_session.start_browser(
-            url="http://localhost:3000",
+            url="https://app.example",
             audio_ws_url="ws://localhost:9091",
             cdp_port=9336,
             headless=True,
@@ -160,7 +160,7 @@ def test_stop_browser_returns_none_without_record_dir(monkeypatch):
     monkeypatch.setattr(browser_session.multiprocessing, "Process", _FakeProcess)
 
     browser_session.start_browser(
-        url="http://localhost:3000",
+        url="https://app.example",
         audio_ws_url="ws://localhost:9091",
         cdp_port=9222,
         headless=True,
@@ -175,7 +175,7 @@ def test_attach_hint_does_not_navigate(monkeypatch):
     monkeypatch.setattr(browser_session.multiprocessing, "Process", _FakeProcess)
 
     info = browser_session.start_browser(
-        url="http://localhost:3000",
+        url="https://app.example",
         audio_ws_url="ws://localhost:9091",
         cdp_port=9222,
         headless=True,

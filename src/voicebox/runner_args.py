@@ -1,9 +1,3 @@
-#
-# Copyright (c) 2026, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
-
 """Custom RunnerArguments for the browser-shim transport.
 
 Pipecat ships RunnerArguments subclasses for Daily, SmallWebRTC, LiveKit,

@@ -1,9 +1,3 @@
-#
-# Copyright (c) 2026, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
-
 """Nova — the fake voice app voicebox dogfoods and (later) evaluates itself against.
 
 Pipeline assembly, runner entry, and the ground-truth observer. What it is and
@@ -41,12 +35,11 @@ from pipecat.processors.aggregators.llm_response_universal import LLMContextAggr
 from pipecat.processors.audio.vad_processor import VADProcessor
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.runner.types import RunnerArguments, SmallWebRTCRunnerArguments
+from pipecat.services.kokoro.tts import KokoroTTSService
 from pipecat.services.whisper.stt import WhisperSTTService
 from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.workers.runner import WorkerRunner
-
-from voicebox.processors.kokoro_tts import KokoroTTSService
 
 load_dotenv()
 
@@ -158,7 +151,7 @@ async def bot(runner_args: RunnerArguments):
             ),
             aggregators.user(),
             create_brain(),
-            KokoroTTSService(voice_id="am_michael"),
+            KokoroTTSService(settings=KokoroTTSService.Settings(voice="am_michael")),
             transport.output(),
             aggregators.assistant(),
         ]

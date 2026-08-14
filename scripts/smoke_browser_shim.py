@@ -2,7 +2,8 @@
 
 Spawns:
   * the pipecat child in BrowserShimRunnerArguments mode (WebSocket server on :9091)
-  * a Playwright Chromium with the shim injected, navigated to about:blank
+  * a Playwright Chromium with the shim injected, navigated to an empty page
+    this script serves on localhost (the shim needs a secure origin)
 
 Then it:
   1. Waits for the shim's WS to connect.
@@ -11,7 +12,7 @@ Then it:
   3. Polls the page for ``window.__voiceShim`` debug counters.
   4. Tears everything down.
 
-This validates the audio plumbing without needing the readme app.
+This validates the audio plumbing without needing any voice app.
 
 Run: ``uv run python scripts/smoke_browser_shim.py``
 """
@@ -27,7 +28,9 @@ logger.add(sys.stderr, level="INFO")
 
 
 async def main():
-    """Run the audio-path smoke test (no readme app needed)."""
+    """Run the audio-path smoke test (no voice app needed)."""
+    from blank_page_server import serve_blank_page
+
     from voicebox.agent_ipc import (
         send_command,
         start_pipecat_process,
@@ -56,7 +59,7 @@ async def main():
     try:
         info = await asyncio.to_thread(
             start_browser,
-            url="http://localhost:3000",  # secure context for hook to install
+            url=serve_blank_page(),  # secure context for hook to install
             audio_ws_url=audio_ws_url,
             cdp_port=cdp_port,
             headless=True,
@@ -72,6 +75,10 @@ async def main():
     await asyncio.sleep(3)
 
     from playwright.async_api import async_playwright
+
+    # Bound here, read after the block below closes: default to failure so an
+    # early exit can never be scored as a pass.
+    audio_arrived = False
 
     async with async_playwright() as p:
         browser = await p.chromium.connect_over_cdp(info["cdp_endpoint"])
@@ -94,7 +101,11 @@ async def main():
             stop_pipecat_process()
             sys.exit(1)
         if not shim_state.get("wsReady"):
-            logger.error("✗ shim WS not ready — pipecat not reachable from browser")
+            # Not a failure: the pipeline needs ~9 s to load its models and bind
+            # :9091, so the shim spends the first seconds retrying and recovers
+            # on its own. That the browser is told a session is ready before the
+            # audio WS accepts anything is issue #22, not a bug in this script.
+            logger.warning("⚠ shim WS not ready yet — still retrying (see issue #22)")
         else:
             logger.success("✓ shim WS connected to pipecat")
         if not shim_state.get("micHookInstalled"):
@@ -114,7 +125,11 @@ async def main():
             "})"
         )
         logger.info(f"shim state (post-speak): {shim_state2}")
-        if shim_state2["inbound"] > 0:
+        # .get: Playwright drops undefined keys, so a shim that vanished (an
+        # attached CDP client navigated the tab) must read as "no audio", not
+        # as a KeyError traceback.
+        audio_arrived = (shim_state2.get("inbound") or 0) > 0
+        if audio_arrived:
             logger.success(f"✓ shim received {shim_state2['inbound']} audio chunks from pipecat")
         else:
             logger.error("✗ no inbound audio chunks received")
@@ -125,6 +140,11 @@ async def main():
     await asyncio.to_thread(stop_browser)
     stop_pipecat_process()
     logger.info("done.")
+
+    # The whole point of this script: Kokoro audio reached the page. Without
+    # this the run exited 0 however dead the audio path was.
+    if not audio_arrived:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -1,9 +1,3 @@
-#
-# Copyright (c) 2026, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
-
 r"""DEBUG-level wall-clock instrumentation for the audio path.
 
 Measures the STT's ``run_stt`` call so a live session log attributes

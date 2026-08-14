@@ -848,3 +848,113 @@ review of PR #21.*
   name and fails if it returns.
 - **Rejected:** retaining Pyright as a non-blocking check. An unused second
   analyzer adds dependency and policy noise without serving the project.
+
+## D30 — Gap-free playout is a generated-audio pipeline policy
+
+*2026-08-12. Issue #19.*
+
+- **Decided:** use pipecat's stock `KokoroTTSService` with TOKEN aggregation and place a
+  `GeneratedUtteranceAudioBuffer` immediately after TTS in the tester pipeline.
+- **Why:** one contiguous synthetic-microphone utterance is a Voicebox playout invariant, not a
+  Kokoro implementation detail. The processor removes the fork-by-copy and applies the policy at
+  the boundary that owns it.
+- **Decided:** warm-up consumes the stock service's public `run_tts` stream; no private Kokoro
+  fields or subclass are required. Nova also uses stock Kokoro without Voicebox's tester-side
+  buffer, preserving reference-instrument independence.
+- **Failure contract:** synthesis error, interruption, cancellation, or pipeline end discards any
+  generated audio that has not reached the transport.
+- **Rejected:** a smaller Kokoro subclass (still couples policy to provider internals) and blank
+  audio insertion (silence remains silence to the target application's VAD).
+
+## D31 — Adopting a stock service means adopting its timers
+
+*2026-08-13. Issue #19, review of D30's implementation.*
+
+- **Context:** D30's code passed 111 unit tests and did not work. Three defects, all in the gap
+  between "subclass the stock service" and pipecat 1.3.0's actual frame routing.
+- **Decided:** pass `stop_frame_timeout_s=TTS_STOP_FRAME_TIMEOUT_SECS` (120 s) when constructing
+  the stock Kokoro service.
+- **Why:** `push_stop_frames=True` (which the stock service sets for us) makes the base class push
+  a `TTSStoppedFrame` after `stop_frame_timeout_s` of silence on an open audio context — 3.0 s by
+  default, sized for streaming HTTP providers. Kokoro under TOKEN aggregation synthesizes the
+  *whole* utterance before yielding anything: measured 4.2 s to first chunk for three sentences
+  and **19.1 s for six**. The premature stop broke three things at once — it disarmed
+  `GeneratedUtteranceAudioBuffer` before any audio arrived (playout silently unbuffered again,
+  i.e. the bug D30 existed to fix), it reached `_PipelineEventObserver` as a *second*
+  `TTSStoppedFrame` per `speak()` so `_tts_pending` decremented twice per increment, and it set
+  `_Playout._tts_finished` before a sample had played.
+- **Rejected:** having the buffer swallow a `TTSStoppedFrame` that arrives with an empty buffer.
+  The observer watches *every* processor→processor push (`agent.py:_PipelineEventObserver`), so it
+  counts the premature frame at the TTS→buffer hop before the buffer could drop it — the guard
+  cannot fix the bookkeeping half, and it would hang an utterance that legitimately yields no
+  audio. Suppressing the frame at its source is the only fix that addresses all three symptoms.
+- **Decided:** the buffer inspects `ErrorFrame` before its direction shortcut.
+- **Why:** D30's failure contract was unreachable code. `TTSService` reports synthesis failure via
+  `push_error_frame`, which pushes the frame **upstream** (`frame_processor.py:push_error_frame`);
+  upstream of the TTS service is the STT, not our buffer. Its test fed the `ErrorFrame` downstream
+  — a direction production never produces — so it passed against absent behaviour.
+- **Decided:** `warm_up_tts_service` waits for `tts.sample_rate` before synthesizing.
+- **Why:** `TTSService.sample_rate` is 0 until the pipeline's `StartFrame` arrives, and the
+  service resamples every chunk to it, so the warm-up failed **every session** with "Sample rate
+  should be over 0" — *yielded* as an `ErrorFrame`, never raised, and discarded by the helper's
+  `async for … pass`. The ~5 s first-inference cost D16 removed had silently returned.
+- **Lesson recorded:** all three were invisible to unit tests and all three were visible in the
+  first live run. #19's verification bar ("unit tests cannot see this class of bug") was correct,
+  and D30 landed with it unmet. A green suite is not evidence for a frame-timing contract.
+
+## D32 — D30's failure contract is not implemented, and the test said otherwise
+
+*2026-08-14. Issue #19, follow-up to D31.*
+
+- **Decided:** record that the D30 "failure contract" (synthesis error discards unplayed generated
+  audio) is **NOT** in force, and pin it as a `strict=True` xfail rather than deleting the claim or
+  the test.
+- **Why:** `GeneratedUtteranceAudioBuffer` sits DOWNSTREAM of the TTS service, and the service
+  reports synthesis failure by pushing an `ErrorFrame` **upstream** — toward the pipeline source,
+  never through anything below it. The buffer cannot observe the failure in either direction. D31
+  "fixed" this by inspecting `ErrorFrame` before the direction shortcut; that only ever covered
+  errors raised *below* the buffer, not the TTS case it was written for.
+- **Rejected:** wiring the service's `on_error` event to `buffer.discard()`. Traced in a real
+  pipeline: the event fires on the service's own task while the utterance's audio frames are still
+  in flight, so the discard lands *before* the audio arrives (clearing nothing) and the following
+  `TTSStoppedFrame` flushes the partial utterance anyway. An out-of-band signal cannot order itself
+  against in-band frames.
+- **Consequence today:** a failed synthesis plays its partial audio into the app's microphone. The
+  app hears a truncated tester turn. Not silently wrong — just not the stated contract.
+- **Open:** a design pass to make the discard in-band. Sketch worth evaluating first: `on_error`
+  sets a flag and the buffer discards at the next `TTSStoppedFrame` instead of flushing — this
+  survives the observed ordering, but the ordering has not been proven general.
+- **Lesson recorded:** the defect was found by moving one test from "call `process_frame` directly"
+  to pipecat's own `run_test` harness, which runs the processor inside a real `Pipeline` and asserts
+  **both** directions. Two of the three D31 defects, plus this one, were invisible to hand-driven
+  processor tests and immediate under `run_test`.
+
+## D33 — Processor contracts are tested through real pipelines
+
+*2026-08-14. Issue #24, folded into PR #23 rather than deferred.*
+
+- **Decided:** PR #23 does not merge on a suite that cannot see what it changed. The buffer's
+  own tests are ported to `pipecat.tests.utils.run_test` inside this PR; the other five
+  hand-driven test files (STT, VAD placement, transcript delivery, stop-drain, timing) stay
+  with issue #24 on its own branch.
+- **Why:** the line is "does this test the processor this PR adds". `test_generated_utterance_
+  audio_buffer.py` did, and two of its cases asserted a downstream `ErrorFrame` — a direction
+  production never produces (D32) — so the PR's core claim rested on a harness blind to it.
+  Folding all six ports in would make the diff unreviewable without adding proof about this
+  processor.
+- **Decided:** a ported test only counts as evidence once it has been shown to FAIL for its
+  stated reason. Four mutations were run against the production processor (buffering removed;
+  `discard()` removed from the `ErrorFrame` branch; `discard()` removed from the interruption
+  branch; the warm-up's sample-rate wait removed) and each failed exactly the test that names
+  it. Recorded in the task artefact.
+- **Why:** the whole lesson of D31/D32 is that green is not evidence. A port that is green on
+  arrival has proven nothing about the harness it replaced.
+- **Decided:** withholding is asserted by ORDER INVERSION — a marker frame sent *after* the
+  first audio frame must arrive *before* it.
+- **Why:** in a real pipeline the buffered and unbuffered frame sequences are identical; only
+  a frame that overtakes the held audio distinguishes them. The old harness could assert
+  mid-stream state directly, which a pipeline deliberately does not expose.
+- **Corrected:** `generated_utterance_audio_buffer.py`'s comment claimed "`agent.py` wires that
+  case to `discard()` through the service's `on_error` event". No such wiring exists — D32
+  rejected it — and `on_error` appears nowhere in `src/`. The comment now states the contract
+  is unhandled and points at D32.

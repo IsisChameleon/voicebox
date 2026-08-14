@@ -1,9 +1,3 @@
-#
-# Copyright (c) 2026, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
-
 """The parent's IPC deadlines must outlive the child work they wait for (D15).
 
 server.py mirrors agent-side timing constants as literals (the parent must

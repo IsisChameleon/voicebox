@@ -29,6 +29,8 @@ logger.add(sys.stderr, level="INFO")
 
 async def main():
     """Run the full-duplex smoke sequence; exit non-zero on any failure."""
+    from blank_page_server import serve_blank_page
+
     from voicebox.agent_ipc import (
         send_command,
         start_pipecat_process,
@@ -52,7 +54,7 @@ async def main():
     try:
         info = await asyncio.to_thread(
             start_browser,
-            url="http://localhost:3000",  # secure context so the hooks install
+            url=serve_blank_page(),  # secure context so the hooks install
             audio_ws_url=f"ws://localhost:{audio_port}",
             cdp_port=cdp_port,
             headless=True,

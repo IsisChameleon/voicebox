@@ -46,7 +46,8 @@ Claude (LLM) ─HTTP/JSON-RPC─► voicebox MCP server (parent, server.py)
 | `src/voicebox/timing.py` | `log_duration` + mixins timing STT / turn-analyzer calls at DEBUG (`voicebox.timing` lines). |
 | `src/voicebox/runner_args.py` | `BrowserShimRunnerArguments` dataclass (host, port, mic_rate, tap_rate, record_dir). Pipecat ships none for plain WS-server transports. |
 | `src/voicebox/raw_pcm_serializer.py` | Tiny `FrameSerializer`: raw 16-bit LE mono PCM, no protobuf/envelope. |
-| `src/voicebox/processors/kokoro_tts.py` | Kokoro TTS service (`voice_id="af_heart"`, TOKEN aggregation, `warm_up`). |
+| `src/voicebox/processors/generated_utterance_audio_buffer.py` | Holds stock-Kokoro audio chunks until `TTSStoppedFrame`, then releases one gap-free span; discards unplayed audio on error/interruption (D30). |
+| `src/voicebox/processors/tts.py` | `warm_up_tts_service` — consumes one throwaway synthesis at startup to pay the lazy model cost off the conversation. |
 | `src/voicebox/processors/nonblocking_whisper_stt.py` | `NonBlockingSegmentedSTT` — Whisper off the frame task (one worker, ordered), eager decode, drain + `transcription_lag_secs`. |
 | `src/voicebox/shim.js` | The browser shim, injected via `addInitScript` before page code. Overrides `getUserMedia` (Hook 1) and wraps `RTCPeerConnection` (Hook 2). Diagnostics on `window.__voiceShim`. |
 | `src/voicebox/browser_session.py` | Manages the Playwright child process. Supports `user_data_dir` (persistent default context, CDP-coherent — exposed via `start_browser_session` for session reuse). See the CDP context-split trap below for why `storage_state` is intentionally not offered. |
@@ -166,9 +167,33 @@ uv run ruff format src/ tests/      # format
 
 The unit suite covers the pure/mockable parts (metrics, browser-session startup, timing
 instrumentation). The audio path itself is verified by `scripts/smoke_browser_shim.py`, which
-needs a real browser; end-to-end behaviour is exercised in live dogfood sessions against the
-bundled fake app on `localhost:7860` (`tests/eval/fake_app/`) — anything marked 🔴 in a spec is
-live-only and cannot be proven by `pytest`.
+needs a real browser but no voice app (it serves its own page); end-to-end behaviour is exercised
+in live dogfood sessions against the bundled fake app on `localhost:7860` (`tests/eval/fake_app/`)
+— anything marked 🔴 in a spec is live-only and cannot be proven by `pytest`.
+
+### Testing frame processors — through a real pipeline, never `process_frame` by hand
+
+**A processor contract that involves frame direction, the `TTSStartedFrame`/`TTSStoppedFrame`
+bracket, `StartFrame` propagation (which is what sets `sample_rate`), or service configuration
+MUST be tested through a real pipeline** — `pipecat.tests.utils.run_test`, which builds
+`Pipeline([source, processor, sink])`, runs a real `PipelineWorker`, and returns **both**
+directions. `SleepFrame` sequences timing-sensitive steps; `observers=` tests observers against
+real pushes.
+
+Four defects shipped or nearly shipped behind a fully green suite because tests instantiated a
+processor, overrode `push_frame` to capture, and called `process_frame` directly (issue #24,
+BUILDLOG D31–D33). That harness cannot see anything the base classes do — and errors travel
+**upstream**, so a downstream-only harness is blind to them.
+
+- Prefer **the real service with only its external dependency stubbed** (kokoro-onnx's
+  `create_stream`, Whisper's `transcribe`) over a fake processor, so base-class behaviour stays in
+  the loop. Worked example: `tests/test_generated_utterance_in_pipeline.py`.
+- Assert `expected_up_frames` wherever errors or interruptions are part of the contract.
+- **A ported or new processor test counts as evidence only once it has been shown to FAIL for its
+  stated reason** — mutate the production code, watch the right test go red, revert. Green on
+  arrival proves nothing.
+- Pure logic (`metrics.py`, `events.py`, deadline arithmetic) stays a fast unit test. This rule is
+  about frame processors, services, and observers.
 
 ## Branch discipline (multi-task branches)
 
@@ -192,8 +217,11 @@ commit the doc update.
 ## Conventions
 
 - Python ≥ 3.11, `uv` for everything. Google-style docstrings (ruff `D` enforced).
-- License header (BSD-2-Clause, "Copyright (c) 2026, Daily") at the top of every `.py` — copy the
-  existing block when adding files.
+- **Do NOT add a copyright header to new `.py` files.** Only four files carry one —
+  `agent.py`, `agent_ipc.py`, `bot.py`, `server.py` — because they descend from the pipecat-derived
+  scaffold in the initial commit `f4b77d2` and BSD-2-Clause clause 1 requires *retaining* Daily's
+  notice on source that still contains their code. Leave those headers alone; never copy one into
+  a new file. `LICENSE` stays at the repo root for the same reason.
 - Single session at a time: ports 9090/9091/9222 are pinned unless overridden via tool args.
 - **All run artifacts go under `temp/` (gitignored, never committed).** Point `record_dir` at
   `temp/<run-name>` for any dogfood/manual run (e.g. `temp/dogfood`), and the `scripts/` drivers

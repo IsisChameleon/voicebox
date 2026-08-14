@@ -127,7 +127,7 @@ def _assert_port_free(port: int, name: str):
 
 @mcp.tool()
 async def start_browser_session(
-    url: str = "http://localhost:3000",
+    url: str,
     headless: bool = False,
     cdp_port: int = 9222,
     audio_port: int = 9091,
@@ -156,7 +156,10 @@ async def start_browser_session(
     run with the same dir — no save step.
 
     Args:
-        url: Initial URL to open (e.g. the app's home page).
+        url: Initial URL to open — the home page of the voice app under test.
+            Required: there is no sensible default, since voicebox exists to
+            test YOUR app. The shim installs its hooks only on a secure origin
+            (https, or http on localhost).
         headless: Run Chromium headless. Default false so you can watch. The
             audio path works headless too.
         cdp_port: Chromium remote-debugging port.

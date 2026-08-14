@@ -1,9 +1,3 @@
-#
-# Copyright (c) 2026, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
-
 """Move Whisper transcription off pipecat's frame task.
 
 ``SegmentedSTTService`` awaits transcription inline: its

@@ -1,9 +1,3 @@
-#
-# Copyright (c) 2026, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
-
 """Raw PCM frame serializer for the browser-shim WebSocket transport.
 
 Wire format: little-endian 16-bit signed PCM, mono. Pipecat's WebSocket

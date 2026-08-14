@@ -158,6 +158,7 @@ def test_vad_stage_precedes_the_stt():
         vad,
         stt,
         tts,
+        agent._generated_utterance_audio_buffer,
         assistant_aggregator,
         agent._transport.output_stage,
     ]

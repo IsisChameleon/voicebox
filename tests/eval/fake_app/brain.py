@@ -1,9 +1,3 @@
-#
-# Copyright (c) 2026, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
-
 """The fake app's "brain" seam: which processor fills the LLM slot of the pipeline.
 
 ``create_brain()`` picks by ``VOICEBOX_FAKE_APP_LLM_PROVIDER`` (env-var table in

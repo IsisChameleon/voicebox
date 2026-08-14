@@ -81,7 +81,7 @@ Cursor (`~/.cursor/mcp.json`):
 | Tool | Purpose |
 |---|---|
 | `start_browser_session(url, headless?, cdp_port?, audio_port?, user_data_dir?, record_dir?)` | Launch a Playwright Chromium with the audio shim injected, navigate to `url`, expose CDP. The shim hijacks the page's mic (fed by Kokoro) and tees the page's WebRTC remote audio into Whisper. Returns `{cdp_endpoint, audio_ws_url, playwright_mcp_env, attach_hint}`. Drive the UI with any Playwright client that can attach over CDP (see below). Pass `user_data_dir` (a persistent Chrome profile) to reuse an authenticated session: log in once and stay logged in on later runs with the same dir. Pass `record_dir` to have `stop()` write the session artifacts (see below). |
-| `speak(text, wait_for_playout?, wait_for_turn?, when?, timer_secs?)` | Synthesize `text` with Kokoro TTS and stream it into the shim's synthetic mic. Returns `{queued: true}` as soon as frames are queued, not when audio has finished playing. `wait_for_playout` instead returns after our own audio finishes, with `played` / `started_at` / `finished_at` / `interrupted` (or `played: false` + `reason` if unobserved within the text-scaled window). `wait_for_turn` waits for the app bot to fall silent first (the polite path) and adds `waited_for_turn_secs`. `when` / `timer_secs` arm a barge-in trigger and return `{armed: true}` (see below). |
+| `speak(text, wait_for_playout?, wait_for_turn?, when?, timer_secs?)` | Synthesize `text` with Kokoro TTS, buffer that generated utterance, then play it into the shim's synthetic mic as one gap-free span. Returns `{queued: true}` as soon as frames are queued, not when audio has finished playing. `wait_for_playout` instead returns after our own audio finishes, with `played` / `started_at` / `finished_at` / `interrupted` (or `played: false` + `reason` if unobserved within the text-scaled window). `wait_for_turn` waits for the app bot to fall silent first (the polite path) and adds `waited_for_turn_secs`. `when` / `timer_secs` arm a barge-in trigger and return `{armed: true}` (see below). |
 | `listen(timeout=30, cursor=0)` | Block until at least one event exists past `cursor`, then return `{events, cursor, transcription_lag_secs}` covering everything from `cursor` onward (each batch sorted by `t`). Pass the returned `cursor` to the next call to resume without missing or re-reading anything; `cursor=0` replays the whole session. `events` is empty on timeout; a non-zero lag means a transcript is still being decoded. |
 | `stop()` | Tear down the pipecat agent and close the Chromium session. Returns `{stopped: true}`, plus `artifacts` (absolute paths) when the session ran with `record_dir`. |
 
@@ -195,6 +195,7 @@ so subtract it before quoting any latency number.
 | `agent_ipc.py` | The shared mailbox between parent and child. Owns the multiprocessing queues and the pipecat-child lifecycle. |
 | `bot.py` | The pipecat child's tiny command loop: `read → dispatch → respond`. |
 | `agent.py` | `PipecatMCPAgent` — the wrapper that owns the Pipecat pipeline behind a `WebsocketServerTransport`. |
+| `processors/generated_utterance_audio_buffer.py` | Holds stock TTS chunks until an utterance completes, then releases one gap-free tester audio span; drops unplayed partial audio on failure/interruption. |
 | `runner_args.py` | The `BrowserShimRunnerArguments` dataclass (host, port, mic_rate, tap_rate, record_dir) — pipecat doesn't ship one for plain WebSocket-server transports. |
 | `raw_pcm_serializer.py` | Tiny `FrameSerializer` that exchanges raw 16-bit LE mono PCM with the browser shim — no protobuf, no envelope. |
 | `shim.js` | The browser shim. Injected via Playwright `addInitScript` so it runs before any page code. Overrides `getUserMedia` to return a synthetic mic stream backed by `MediaStreamTrackGenerator`, and wraps `RTCPeerConnection` to tap every inbound audio track via Web Audio (`MediaStreamAudioSourceNode → AudioWorkletNode`) back to the server. |
@@ -212,7 +213,9 @@ so subtract it before quoting any latency number.
 3.  [CHILD-1: pipecat]             create_agent → WebsocketServerTransport with RawPCMSerializer
                                      audio_in_sample_rate  = 16000 (Whisper-MLX requires 16 kHz)
                                      audio_out_sample_rate = 48000 (Kokoro → page mic)
-                                   pipeline: transport.input → VAD → Whisper → Kokoro → assistant context → transport.output
+                                   pipeline: transport.input → VAD → Whisper → stock Kokoro
+                                             → GeneratedUtteranceAudioBuffer
+                                             → assistant context → transport.output
                                    websocket listening on :9091
 4.  [CHILD-2: browser]             read shim.js, prepend window.__VOICE_SHIM_WS_URL__
                                    chromium.launch(args=[--remote-debugging-port=9222,
@@ -231,7 +234,8 @@ so subtract it before quoting any latency number.
                                    → the app creates RTCPeerConnection to its SFU
                                    → bot starts streaming audio → shim's track-event hook
                                      pipes it via Web Audio worklet → WebSocket → pipecat
-7.  [Claude] speak("hi ember")     Kokoro renders audio → WebsocketServerTransport writes Int16 PCM
+7.  [Claude] speak("hi ember")     Stock Kokoro renders chunks → GeneratedUtteranceAudioBuffer
+                                   releases one contiguous utterance → transport writes Int16 PCM
                                    over the WS → shim writes AudioData chunks into the
                                    MediaStreamTrackGenerator → the page's WebRTC peer encodes Opus
 8.  [Claude] listen()              VAD delimits the bot's utterance → Whisper's
