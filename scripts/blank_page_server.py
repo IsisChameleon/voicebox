@@ -15,7 +15,8 @@ _PAGE = b"<!doctype html><title>voicebox smoke</title><body></body>"
 
 
 class _BlankPage(BaseHTTPRequestHandler):
-    def do_GET(self):  # noqa: N802 — BaseHTTPRequestHandler's naming
+    # do_GET is the name BaseHTTPRequestHandler dispatches to; not ours to choose.
+    def do_GET(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
         self.send_header("Content-Length", str(len(_PAGE)))
@@ -32,10 +33,16 @@ def serve_blank_page() -> str:
     The server runs on a daemon thread and needs no teardown: it dies with the
     script that started it.
 
+    The URL names ``127.0.0.1`` rather than ``localhost`` so it matches the
+    bound address exactly — on a dual-stack host ``localhost`` can resolve to
+    ``::1`` first, which nothing is listening on. Chromium treats 127.0.0.1 as a
+    secure origin, so ``navigator.mediaDevices`` still exists and the shim's
+    hooks install (`shim.js:174`).
+
     Returns:
-        The URL to open, e.g. ``http://localhost:41337``.
+        The URL to open, e.g. ``http://127.0.0.1:41337``.
 
     """
     server = ThreadingHTTPServer(("127.0.0.1", 0), _BlankPage)
     Thread(target=server.serve_forever, daemon=True).start()
-    return f"http://localhost:{server.server_port}"
+    return f"http://127.0.0.1:{server.server_port}"

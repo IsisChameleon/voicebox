@@ -168,6 +168,31 @@ not a script defect.
 
 ---
 
+## Review pass on this task's own diff
+
+`/code-review high` could not run — the agent died twice on `API Error: 529 Overloaded`, a
+server-side fault, before it read the diff. Reviewed inline instead. Three findings, all fixed:
+
+| Finding | Why it mattered | Fix |
+|---|---|---|
+| `serve_blank_page()` bound `127.0.0.1` but returned a `localhost` URL | On a dual-stack host `localhost` can resolve to `::1` first, where nothing listens — the navigation fails and `start_browser` raises | URL now names `127.0.0.1`, matching the bind |
+| `audio_arrived` was bound inside the `async with` block and read 13 lines after it closed | Any future early exit from that block would raise `NameError` instead of failing the run — a dead audio path scored as a crash, not a verdict | initialized `False` before the block |
+| `# noqa: N802` on `do_GET` | `pyproject.toml:71-75` selects only `D` and `I`; pep8-naming is not enabled, so the directive suppressed nothing and implied a rule that does not exist | replaced with a plain comment |
+
+The 127.0.0.1 change touches the secure-origin requirement, so it was verified rather than assumed.
+The shim gates hook 1 on `diag.hasMediaDevices && diag.hasWebCodecs` (`src/voicebox/shim.js:174`) —
+no literal `localhost` test — and the re-run confirms it:
+
+```
+page url: http://127.0.0.1:34849/, title: 'voicebox smoke'
+shim state (pre-speak): {'installed': True, 'micHookInstalled': True, 'pcHookInstalled': True,
+                         ... 'hasMediaDevices': True, 'hasWebCodecs': True}
+✓ shim received 40 audio chunks from pipecat
+EXIT=0
+```
+
+---
+
 ## Not covered
 
 - **The other five hand-driven test files.** `test_nonblocking_stt.py`, `test_vad_placement.py`,

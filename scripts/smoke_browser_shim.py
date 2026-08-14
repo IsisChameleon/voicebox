@@ -76,6 +76,10 @@ async def main():
 
     from playwright.async_api import async_playwright
 
+    # Bound here, read after the block below closes: default to failure so an
+    # early exit can never be scored as a pass.
+    audio_arrived = False
+
     async with async_playwright() as p:
         browser = await p.chromium.connect_over_cdp(info["cdp_endpoint"])
         ctx = browser.contexts[0]
