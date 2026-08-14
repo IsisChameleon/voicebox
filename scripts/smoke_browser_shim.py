@@ -125,7 +125,10 @@ async def main():
             "})"
         )
         logger.info(f"shim state (post-speak): {shim_state2}")
-        audio_arrived = shim_state2["inbound"] > 0
+        # .get: Playwright drops undefined keys, so a shim that vanished (an
+        # attached CDP client navigated the tab) must read as "no audio", not
+        # as a KeyError traceback.
+        audio_arrived = (shim_state2.get("inbound") or 0) > 0
         if audio_arrived:
             logger.success(f"✓ shim received {shim_state2['inbound']} audio chunks from pipecat")
         else:

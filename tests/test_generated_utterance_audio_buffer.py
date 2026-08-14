@@ -46,6 +46,17 @@ class _FailsBelowTheBuffer(FrameProcessor):
             await self.push_error_frame(ErrorFrame("synthesis failed"))
 
 
+class _EmitsUpstreamOnStart(FrameProcessor):
+    """Sends frames back up through the buffer while its utterance is open."""
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        await self.push_frame(frame, direction)
+        if isinstance(frame, TTSStartedFrame):
+            await self.push_frame(TextFrame("travelling up"), FrameDirection.UPSTREAM)
+            await self.push_frame(_audio(3), FrameDirection.UPSTREAM)
+
+
 def _audio(value: int, context_id: str = "utterance") -> TTSAudioRawFrame:
     return TTSAudioRawFrame(bytes([value]), 48000, 1, context_id=context_id)
 
@@ -54,7 +65,7 @@ async def test_generated_audio_is_withheld_until_its_utterance_closes():
     # The proof of withholding is the ORDER INVERSION, not the final sequence:
     # the marker is sent after the first audio frame and must arrive before it.
     # A buffer that forwarded audio immediately would emit them as sent.
-    await run_test(
+    received_down, _ = await run_test(
         GeneratedUtteranceAudioBuffer(),
         frames_to_send=[
             TTSStartedFrame(context_id="utterance"),
@@ -72,15 +83,33 @@ async def test_generated_audio_is_withheld_until_its_utterance_closes():
         ],
     )
 
+    # expected_down_frames compares TYPES, so it cannot see the held span coming
+    # out backwards. The payloads can: the buffer's whole job is one contiguous
+    # span in the order it was generated.
+    assert [f.audio for f in received_down if isinstance(f, TTSAudioRawFrame)] == [
+        bytes([1]),
+        bytes([2]),
+    ], "the held audio must be released in generation order"
 
-async def test_upstream_frames_pass_through_unchanged():
-    # Sent from the END of the pipeline, so they traverse the buffer upwards -
-    # the direction the old hand-driven harness could not reach.
-    await run_test(
-        GeneratedUtteranceAudioBuffer(),
-        frames_to_send=[TextFrame("travelling up"), _audio(3)],
-        frames_to_send_direction=FrameDirection.UPSTREAM,
+
+async def test_upstream_frames_pass_through_while_an_utterance_is_open():
+    # The upstream guard only does work while _buffering is True — an upstream
+    # TTSAudioRawFrame is the one frame the buffering branch would otherwise
+    # swallow. So the utterance must be OPEN, which means the upstream frames
+    # cannot come from `frames_to_send` (one direction per run): a processor
+    # below the buffer emits them when it sees the utterance start.
+    _, received_up = await run_test(
+        Pipeline([GeneratedUtteranceAudioBuffer(), _EmitsUpstreamOnStart()]),
+        frames_to_send=[
+            TTSStartedFrame(context_id="utterance"),
+            SleepFrame(0.2),  # let the upstream frames traverse the buffer
+            TTSStoppedFrame(context_id="utterance"),
+        ],
         expected_up_frames=[TextFrame, TTSAudioRawFrame],
+    )
+
+    assert [f.audio for f in received_up if isinstance(f, TTSAudioRawFrame)] == [bytes([3])], (
+        "upstream audio must pass through untouched, not be collected as playout"
     )
 
 

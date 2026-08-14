@@ -84,6 +84,33 @@ FAILED tests/test_generated_utterance_in_pipeline.py::test_warm_up_synthesizes_o
 Note B and C: only the test that names each behaviour fails. The tests are specific, not merely
 sensitive.
 
+**Correction — that first table was incomplete, and an independent review proved it.** Mutations
+A–D covered four of the five tests. A reviewing agent (fresh context, read-only, given the diff and
+told not to trust the claims) found that the two uncovered behaviours were not actually protected:
+
+```
+=== MUTATION E: released span comes out BACKWARDS (popleft -> pop) ===
+FAILED ...::test_generated_audio_is_withheld_until_its_utterance_closes
+1 failed, 3 passed, 1 warning in 2.61s
+=== MUTATION F: upstream guard deleted ===
+FAILED ...::test_upstream_frames_pass_through_while_an_utterance_is_open
+1 failed, 3 passed, 1 warning in 2.91s
+```
+
+Both mutations **passed silently** before the fix:
+
+- **E:** `expected_down_frames` compares frame *types*, and both audio frames are
+  `TTSAudioRawFrame` — releasing the held span in reverse order was invisible. The test now asserts
+  the payload bytes, which is the ordering the buffer exists to guarantee.
+- **F:** `test_upstream_frames_pass_through_unchanged` never sent a `TTSStartedFrame`, so
+  `_buffering` was `False` and the upstream audio frame fell through to the pass-through branch
+  regardless. The guard it meant to test only does work while an utterance is OPEN. The test now
+  opens one, and gets its upstream frames from a processor below the buffer (`run_test` sends
+  `frames_to_send` in one direction only).
+
+Lesson, same shape as D31/D33: "mutation-checked" is only as good as the mutation list, and the
+list was written by the same author as the tests.
+
 ### Suite + lint
 
 ```
