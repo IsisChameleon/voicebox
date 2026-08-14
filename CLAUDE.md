@@ -193,8 +193,11 @@ commit the doc update.
 ## Conventions
 
 - Python ≥ 3.11, `uv` for everything. Google-style docstrings (ruff `D` enforced).
-- License header (BSD-2-Clause, "Copyright (c) 2026, Daily") at the top of every `.py` — copy the
-  existing block when adding files.
+- **Do NOT add a copyright header to new `.py` files.** Only four files carry one —
+  `agent.py`, `agent_ipc.py`, `bot.py`, `server.py` — because they descend from the pipecat-derived
+  scaffold in the initial commit `f4b77d2` and BSD-2-Clause clause 1 requires *retaining* Daily's
+  notice on source that still contains their code. Leave those headers alone; never copy one into
+  a new file. `LICENSE` stays at the repo root for the same reason.
 - Single session at a time: ports 9090/9091/9222 are pinned unless overridden via tool args.
 - **All run artifacts go under `temp/` (gitignored, never committed).** Point `record_dir` at
   `temp/<run-name>` for any dogfood/manual run (e.g. `temp/dogfood`), and the `scripts/` drivers

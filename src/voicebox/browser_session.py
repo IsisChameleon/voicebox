@@ -1,9 +1,3 @@
-#
-# Copyright (c) 2026, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
-
 """Launches a Playwright-controlled Chromium with the browser audio shim.
 
 The shim (``shim.js``) intercepts ``getUserMedia`` and wraps

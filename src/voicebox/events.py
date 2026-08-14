@@ -1,9 +1,3 @@
-#
-# Copyright (c) 2026, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
-
 """Conversation-event vocabulary for the voicebox event stream.
 
 Single source of truth for the events ``listen()`` returns. Two parties, named

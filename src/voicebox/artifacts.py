@@ -1,9 +1,3 @@
-#
-# Copyright (c) 2026, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
-
 """Shared helper for the ``record_dir`` artifact-path convention.
 
 Both the pipecat child (``agent.py``, files it writes itself) and the browser

@@ -1,9 +1,3 @@
-#
-# Copyright (c) 2026, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
-
 """Nova — the fake voice app voicebox dogfoods and (later) evaluates itself against.
 
 Pipeline assembly, runner entry, and the ground-truth observer. What it is and

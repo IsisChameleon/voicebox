@@ -1,9 +1,3 @@
-#
-# Copyright (c) 2026, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
-
 """Helpers shared by text-to-speech services."""
 
 import asyncio

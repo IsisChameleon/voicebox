@@ -1,9 +1,3 @@
-#
-# Copyright (c) 2026, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
-
 """Task H: listen() batches are time-ordered and paging stays lossless.
 
 ``app_bot_speech_*`` events carry ``t`` from frame construction while their
