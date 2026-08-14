@@ -167,9 +167,33 @@ uv run ruff format src/ tests/      # format
 
 The unit suite covers the pure/mockable parts (metrics, browser-session startup, timing
 instrumentation). The audio path itself is verified by `scripts/smoke_browser_shim.py`, which
-needs a real browser; end-to-end behaviour is exercised in live dogfood sessions against the
-bundled fake app on `localhost:7860` (`tests/eval/fake_app/`) — anything marked 🔴 in a spec is
-live-only and cannot be proven by `pytest`.
+needs a real browser but no voice app (it serves its own page); end-to-end behaviour is exercised
+in live dogfood sessions against the bundled fake app on `localhost:7860` (`tests/eval/fake_app/`)
+— anything marked 🔴 in a spec is live-only and cannot be proven by `pytest`.
+
+### Testing frame processors — through a real pipeline, never `process_frame` by hand
+
+**A processor contract that involves frame direction, the `TTSStartedFrame`/`TTSStoppedFrame`
+bracket, `StartFrame` propagation (which is what sets `sample_rate`), or service configuration
+MUST be tested through a real pipeline** — `pipecat.tests.utils.run_test`, which builds
+`Pipeline([source, processor, sink])`, runs a real `PipelineWorker`, and returns **both**
+directions. `SleepFrame` sequences timing-sensitive steps; `observers=` tests observers against
+real pushes.
+
+Four defects shipped or nearly shipped behind a fully green suite because tests instantiated a
+processor, overrode `push_frame` to capture, and called `process_frame` directly (issue #24,
+BUILDLOG D31–D33). That harness cannot see anything the base classes do — and errors travel
+**upstream**, so a downstream-only harness is blind to them.
+
+- Prefer **the real service with only its external dependency stubbed** (kokoro-onnx's
+  `create_stream`, Whisper's `transcribe`) over a fake processor, so base-class behaviour stays in
+  the loop. Worked example: `tests/test_generated_utterance_in_pipeline.py`.
+- Assert `expected_up_frames` wherever errors or interruptions are part of the contract.
+- **A ported or new processor test counts as evidence only once it has been shown to FAIL for its
+  stated reason** — mutate the production code, watch the right test go red, revert. Green on
+  arrival proves nothing.
+- Pure logic (`metrics.py`, `events.py`, deadline arithmetic) stays a fast unit test. This rule is
+  about frame processors, services, and observers.
 
 ## Branch discipline (multi-task branches)
 
