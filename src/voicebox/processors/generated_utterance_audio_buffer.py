@@ -43,8 +43,11 @@ class GeneratedUtteranceAudioBuffer(FrameProcessor):
         # whose frames pass back through here. It does NOT catch the TTS
         # service's own synthesis failure: that is pushed upstream from a
         # processor above us and reaches the pipeline source without ever
-        # touching this one. `agent.py` wires that case to `discard()` through
-        # the service's `on_error` event.
+        # touching this one. That case is UNHANDLED — a failed synthesis plays
+        # its partial audio. Wiring the service's `on_error` was tried and
+        # rejected (the event races ahead of the in-flight audio); see
+        # BUILDLOG D32 and the strict xfail in
+        # tests/test_generated_utterance_in_pipeline.py.
         if isinstance(frame, ErrorFrame):
             self.discard()
             await self.push_frame(frame, direction)

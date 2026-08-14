@@ -13,6 +13,8 @@ asserts BOTH directions. The service is the real production one from
 external dependency — is stubbed, so the pipecat machinery all still runs.
 """
 
+import asyncio
+
 import numpy as np
 import pytest
 from pipecat.frames.frames import (
@@ -27,12 +29,13 @@ from pipecat.frames.frames import (
     TTSTextFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.tests.utils import run_test
+from pipecat.tests.utils import SleepFrame, run_test
 
 from voicebox.agent import PipecatMCPAgent
 from voicebox.processors.generated_utterance_audio_buffer import (
     GeneratedUtteranceAudioBuffer,
 )
+from voicebox.processors.tts import warm_up_tts_service
 
 
 class _StubbedKokoroStream:
@@ -52,11 +55,17 @@ class _StubbedKokoroStream:
             yield np.zeros(480, dtype=np.float32), 24000
 
 
-def _production_tts(chunks: int, raise_after: int | None = None):
+def _production_tts(chunks: int, raise_after: int | None = None, syntheses: list | None = None):
     """Build the real service with the production config, minus the ONNX model."""
     service = PipecatMCPAgent(None)._create_tts_service()  # type: ignore[arg-type]
     service._kokoro = type("_K", (), {})()
-    service._kokoro.create_stream = lambda *a, **k: _StubbedKokoroStream(chunks, raise_after)
+
+    def _create_stream(*args, **kwargs):
+        if syntheses is not None:
+            syntheses.append(kwargs.get("text", args[0] if args else None))
+        return _StubbedKokoroStream(chunks, raise_after)
+
+    service._kokoro.create_stream = _create_stream
     return service
 
 
@@ -88,6 +97,29 @@ async def test_one_speak_produces_exactly_one_tts_bracket():
             TTSStoppedFrame,
             LLMFullResponseEndFrame,
         ],
+    )
+
+
+async def test_warm_up_synthesizes_once_the_pipeline_hands_over_a_sample_rate():
+    # The defect this pins (D31): TTSService.sample_rate is 0 until StartFrame
+    # reaches it, and the service resamples every chunk to that rate, so the
+    # warm-up failed EVERY session with "Sample rate should be over 0" - yielded
+    # as an ErrorFrame, never raised, so it looked like it had worked. Only a
+    # real pipeline delivers the StartFrame that sets the rate.
+    syntheses: list[str] = []
+    tts = _production_tts(chunks=2, syntheses=syntheses)
+    warm_up = asyncio.create_task(warm_up_tts_service(tts))
+    await asyncio.sleep(0.1)
+
+    assert not warm_up.done(), "warm-up must park until the pipeline sets a sample rate"
+    assert syntheses == [], "nothing may be synthesized at sample rate 0"
+
+    received_down, _ = await run_test(tts, frames_to_send=[SleepFrame(0.5)])
+    await asyncio.wait_for(warm_up, timeout=2)
+
+    assert syntheses == ["Ready."], "the warm-up utterance must reach the model exactly once"
+    assert not any(isinstance(f, TTSAudioRawFrame) for f in received_down), (
+        "warm-up audio must be consumed by the helper, never played into the pipeline"
     )
 
 

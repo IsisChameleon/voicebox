@@ -928,3 +928,33 @@ review of PR #21.*
   to pipecat's own `run_test` harness, which runs the processor inside a real `Pipeline` and asserts
   **both** directions. Two of the three D31 defects, plus this one, were invisible to hand-driven
   processor tests and immediate under `run_test`.
+
+## D33 — Processor contracts are tested through real pipelines
+
+*2026-08-14. Issue #24, folded into PR #23 rather than deferred.*
+
+- **Decided:** PR #23 does not merge on a suite that cannot see what it changed. The buffer's
+  own tests are ported to `pipecat.tests.utils.run_test` inside this PR; the other five
+  hand-driven test files (STT, VAD placement, transcript delivery, stop-drain, timing) stay
+  with issue #24 on its own branch.
+- **Why:** the line is "does this test the processor this PR adds". `test_generated_utterance_
+  audio_buffer.py` did, and two of its cases asserted a downstream `ErrorFrame` — a direction
+  production never produces (D32) — so the PR's core claim rested on a harness blind to it.
+  Folding all six ports in would make the diff unreviewable without adding proof about this
+  processor.
+- **Decided:** a ported test only counts as evidence once it has been shown to FAIL for its
+  stated reason. Four mutations were run against the production processor (buffering removed;
+  `discard()` removed from the `ErrorFrame` branch; `discard()` removed from the interruption
+  branch; the warm-up's sample-rate wait removed) and each failed exactly the test that names
+  it. Recorded in the task artefact.
+- **Why:** the whole lesson of D31/D32 is that green is not evidence. A port that is green on
+  arrival has proven nothing about the harness it replaced.
+- **Decided:** withholding is asserted by ORDER INVERSION — a marker frame sent *after* the
+  first audio frame must arrive *before* it.
+- **Why:** in a real pipeline the buffered and unbuffered frame sequences are identical; only
+  a frame that overtakes the held audio distinguishes them. The old harness could assert
+  mid-stream state directly, which a pipeline deliberately does not expose.
+- **Corrected:** `generated_utterance_audio_buffer.py`'s comment claimed "`agent.py` wires that
+  case to `discard()` through the service's `on_error` event". No such wiring exists — D32
+  rejected it — and `on_error` appears nowhere in `src/`. The comment now states the contract
+  is unhandled and points at D32.
