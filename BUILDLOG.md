@@ -901,3 +901,30 @@ review of PR #21.*
 - **Lesson recorded:** all three were invisible to unit tests and all three were visible in the
   first live run. #19's verification bar ("unit tests cannot see this class of bug") was correct,
   and D30 landed with it unmet. A green suite is not evidence for a frame-timing contract.
+
+## D32 — D30's failure contract is not implemented, and the test said otherwise
+
+*2026-08-14. Issue #19, follow-up to D31.*
+
+- **Decided:** record that the D30 "failure contract" (synthesis error discards unplayed generated
+  audio) is **NOT** in force, and pin it as a `strict=True` xfail rather than deleting the claim or
+  the test.
+- **Why:** `GeneratedUtteranceAudioBuffer` sits DOWNSTREAM of the TTS service, and the service
+  reports synthesis failure by pushing an `ErrorFrame` **upstream** — toward the pipeline source,
+  never through anything below it. The buffer cannot observe the failure in either direction. D31
+  "fixed" this by inspecting `ErrorFrame` before the direction shortcut; that only ever covered
+  errors raised *below* the buffer, not the TTS case it was written for.
+- **Rejected:** wiring the service's `on_error` event to `buffer.discard()`. Traced in a real
+  pipeline: the event fires on the service's own task while the utterance's audio frames are still
+  in flight, so the discard lands *before* the audio arrives (clearing nothing) and the following
+  `TTSStoppedFrame` flushes the partial utterance anyway. An out-of-band signal cannot order itself
+  against in-band frames.
+- **Consequence today:** a failed synthesis plays its partial audio into the app's microphone. The
+  app hears a truncated tester turn. Not silently wrong — just not the stated contract.
+- **Open:** a design pass to make the discard in-band. Sketch worth evaluating first: `on_error`
+  sets a flag and the buffer discards at the next `TTSStoppedFrame` instead of flushing — this
+  survives the observed ordering, but the ordering has not been proven general.
+- **Lesson recorded:** the defect was found by moving one test from "call `process_frame` directly"
+  to pipecat's own `run_test` harness, which runs the processor inside a real `Pipeline` and asserts
+  **both** directions. Two of the three D31 defects, plus this one, were invisible to hand-driven
+  processor tests and immediate under `run_test`.

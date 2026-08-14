@@ -44,15 +44,15 @@ class GeneratedUtteranceAudioBuffer(FrameProcessor):
         """Buffer downstream generated audio until its utterance is complete."""
         await super().process_frame(frame, direction)
 
-        # A synthesis failure reaches us travelling UPSTREAM: the TTS service
-        # reports it via push_error_frame, which pushes the ErrorFrame upstream
-        # rather than on through the pipeline (pipecat frame_processor.py
-        # push_error_frame, tts_service.py's ErrorFrame branch). Checking it
-        # before the direction shortcut is what makes the discard reachable at
-        # all — the following TTSStoppedFrame would otherwise flush the failed
-        # utterance's partial audio.
+        # Errors travel UPSTREAM (frame_processor.py push_error_frame), so this
+        # catches failures raised BELOW us — the transport, the aggregator —
+        # whose frames pass back through here. It does NOT catch the TTS
+        # service's own synthesis failure: that is pushed upstream from a
+        # processor above us and reaches the pipeline source without ever
+        # touching this one. `agent.py` wires that case to `discard()` through
+        # the service's `on_error` event.
         if isinstance(frame, ErrorFrame):
-            self._discard()
+            self.discard()
             await self.push_frame(frame, direction)
             return
 
@@ -72,12 +72,12 @@ class GeneratedUtteranceAudioBuffer(FrameProcessor):
                 await self.push_frame(self._audio_frames.popleft(), direction)
             await self.push_frame(frame, direction)
         elif isinstance(frame, (InterruptionFrame, CancelFrame, EndFrame)):
-            self._discard()
+            self.discard()
             await self.push_frame(frame, direction)
         else:
             await self.push_frame(frame, direction)
 
-    def _discard(self):
+    def discard(self):
         """Drop generated audio that has not reached the transport."""
         self._audio_frames.clear()
         self._buffering = False

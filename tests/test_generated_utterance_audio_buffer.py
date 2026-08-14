@@ -78,11 +78,12 @@ async def test_non_generated_and_upstream_frames_pass_through_unchanged():
     ]
 
 
-async def test_synthesis_error_discards_a_partial_generated_utterance():
-    # The ErrorFrame must travel UPSTREAM, the direction production actually
-    # produces: TTSService reports failure via push_error_frame, which pushes
-    # upstream. An earlier version of this test pushed it downstream, so it
-    # passed against a discard branch that could never run in production.
+async def test_an_error_from_below_discards_a_partial_generated_utterance():
+    # Scope note: this covers errors raised BELOW the buffer (transport,
+    # aggregator), whose ErrorFrame passes back up through it. It does NOT
+    # cover a TTS synthesis failure - that error is pushed upstream from ABOVE
+    # the buffer and never reaches it. See the xfail in
+    # tests/test_generated_utterance_in_pipeline.py and BUILDLOG D32.
     processor = _CaptureBuffer()
     started = TTSStartedFrame(context_id="utterance")
     partial_audio = _audio(1)
