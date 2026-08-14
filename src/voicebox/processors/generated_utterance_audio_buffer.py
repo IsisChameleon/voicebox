@@ -46,7 +46,7 @@ class GeneratedUtteranceAudioBuffer(FrameProcessor):
         # touching this one. That case is UNHANDLED — a failed synthesis plays
         # its partial audio. Wiring the service's `on_error` was tried and
         # rejected (the event races ahead of the in-flight audio); see
-        # BUILDLOG D32 and the strict xfail in
+        # BUILDLOG D32, issue #25, and the strict xfail in
         # tests/test_generated_utterance_in_pipeline.py.
         if isinstance(frame, ErrorFrame):
             self.discard()

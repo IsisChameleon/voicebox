@@ -131,7 +131,7 @@ async def test_warm_up_synthesizes_once_the_pipeline_hands_over_a_sample_rate():
         "error in either direction. Wiring the service's on_error event does not fix it either: "
         "the event fires on the service's own task while the audio frames are still in flight, "
         "so the discard lands BEFORE the audio arrives and the following TTSStoppedFrame flushes "
-        "it anyway. Needs a design pass - see the issue linked in BUILDLOG D32."
+        "it anyway. Needs a design pass - BUILDLOG D32, issue #25."
     ),
 )
 async def test_synthesis_failure_routes_upstream_and_drops_partial_audio():

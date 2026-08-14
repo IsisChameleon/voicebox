@@ -88,7 +88,9 @@ uv run python scripts/smoke_browser_shim.py        # ~25 s, needs no voice app
   `test_vad_placement.py`, `test_transcript_delivery.py`, `test_stop_drains_stt.py`, the observer
   half of `test_agent_surface.py`) stay with issue #24.
 - **Task 2/3:** the D32 failure contract is still **not implemented** — a failed synthesis plays
-  its partial audio — and is pinned as a `strict=True` xfail stating the specification.
+  its partial audio — and is pinned as a `strict=True` xfail stating the specification. Filed as
+  [issue #25](https://github.com/IsisChameleon/voicebox/issues/25), which needs a design pass
+  before code: both obvious fixes were traced and rejected.
 - **Task 4:** `scripts/smoke_full_duplex.py` was changed the same way but not run; no live dogfood
   against Nova this round.
 - Timings are one WSL2 host with a warm ONNX cache, not a distribution.
